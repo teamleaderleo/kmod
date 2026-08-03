@@ -6,7 +6,7 @@
 
 static int modprobe_options_config_path_control(void)
 {
-	return EXEC_TOOL(modprobe, "-C", "/etc/modprobe-config", "mod-loop-a");
+	return EXEC_TOOL(modprobe, "-C", "/etc/modprobe-config", "mod-loop-b");
 }
 DEFINE_TEST(modprobe_options_config_path_control,
 	.description = "check recursive modprobe preserves a config path without spaces",
@@ -27,7 +27,7 @@ DEFINE_TEST(modprobe_options_config_path_control,
 
 static int modprobe_options_config_path_space(void)
 {
-	return EXEC_TOOL(modprobe, "-C", "/etc/modprobe config", "mod-loop-a");
+	return EXEC_TOOL(modprobe, "-C", "/etc/modprobe config", "mod-loop-b");
 }
 DEFINE_TEST(modprobe_options_config_path_space,
 	.description = "check recursive modprobe preserves a config path containing a space",
