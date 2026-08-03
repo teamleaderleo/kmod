@@ -31,7 +31,7 @@ jobs:
           ref: fix/modprobe-options-config-path
 
       - name: Setup OS
-        uses: ./.github/actions/setup-os
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
 
       - name: Apply exact patch
         run: |
