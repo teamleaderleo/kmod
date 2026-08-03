@@ -3,10 +3,17 @@
 name: Bootstrap modprobe option transport
 
 on:
+  push:
+    branches:
+      - fix/modprobe-options-config-path
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: modprobe-options-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   apply-build-test:
