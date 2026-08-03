@@ -3,6 +3,7 @@
 name: Bootstrap modprobe option transport
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - fix/modprobe-options-config-path
