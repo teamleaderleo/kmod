@@ -82,6 +82,7 @@ _testsuite = [
   'test-libkmod-list',
   'test-modinfo',
   'test-modprobe',
+  'test-modprobe-options',
   'test-shared',
   'test-testsuite',
 ]
