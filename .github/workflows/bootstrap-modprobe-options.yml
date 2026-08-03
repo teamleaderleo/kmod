@@ -31,7 +31,9 @@ jobs:
           ref: fix/modprobe-options-config-path
 
       - name: Setup OS
-        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+        run: |
+          sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+          sudo apt-get install -y libmbedtls-dev
 
       - name: Apply exact patch
         run: |
