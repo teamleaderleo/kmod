@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
+#include <stdlib.h>
+
 #include "testsuite.h"
 
 static int modprobe_options_config_path(void)
