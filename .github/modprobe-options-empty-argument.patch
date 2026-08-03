@@ -61,3 +61,10 @@ index 2a782ad..7c1d55d 100644
 +		}
  	}
  	*q = '\0';
+diff --git a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt
+index ab3c394..eb2f409 100644
+--- a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt
++++ b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt
+@@ -1 +1 @@
+-mod-loop-a
++mod_loop_a
