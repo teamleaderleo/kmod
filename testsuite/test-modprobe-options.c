@@ -13,6 +13,7 @@ DEFINE_TEST(modprobe_options_config_path_control,
 	.config = {
 		[TC_UNAME_R] = "4.4.4",
 		[TC_ROOTFS] = TESTSUITE_ROOTFS "test-modprobe/install-cmd-loop",
+		[TC_INIT_MODULE_RETCODES] = "",
 	},
 	.env_vars = (const struct keyval[]) {
 		{ "MODPROBE", TOOLS_DIR "/modprobe" },
@@ -33,6 +34,7 @@ DEFINE_TEST(modprobe_options_config_path_space,
 	.config = {
 		[TC_UNAME_R] = "4.4.4",
 		[TC_ROOTFS] = TESTSUITE_ROOTFS "test-modprobe/install-cmd-loop",
+		[TC_INIT_MODULE_RETCODES] = "",
 	},
 	.env_vars = (const struct keyval[]) {
 		{ "MODPROBE", TOOLS_DIR "/modprobe" },
