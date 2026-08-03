@@ -6,13 +6,16 @@ on:
   push:
     branches:
       - fix/modprobe-options-config-path
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: modprobe-options-${{ github.ref }}
+  group: modprobe-options-${{ github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
