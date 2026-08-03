@@ -27,6 +27,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Verify exact carrier ancestry
+        run: |
+          test "$(git merge-base HEAD 5086df53090b2fe9fa1c31351c05a78a12a4ba71)" = \
+            "5086df53090b2fe9fa1c31351c05a78a12a4ba71"
+
       - name: Setup OS
         run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
 
@@ -46,11 +51,13 @@ jobs:
           rm .github/modprobe-options-empty-argument.patch
           rm .github/modprobe-options-append-errors.patch
           rm .github/workflows/bootstrap-modprobe-options.yml
-          git diff --check
+          git diff --check 5086df53090b2fe9fa1c31351c05a78a12a4ba71
 
       - name: Require source-only materialized diff
         run: |
-          git diff --name-only > materialized-files.txt
+          git diff --name-only \
+            5086df53090b2fe9fa1c31351c05a78a12a4ba71 -- \
+            > materialized-files.txt
           cat > expected-materialized-files.txt <<'EOF'
           testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/config dir/modprobe.conf
           testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt
