@@ -1,0 +1,40 @@
+# Temporary one-shot branch bootstrap. The workflow removes itself in the
+# generated source commit.
+name: Bootstrap modprobe option transport
+
+on:
+  push:
+    branches:
+      - fix/modprobe-options-config-path
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Apply exact patch
+        run: |
+          git apply --check .github/modprobe-options.patch
+          git apply .github/modprobe-options.patch
+          rm .github/modprobe-options.patch
+          rm .github/workflows/bootstrap-modprobe-options.yml
+          git diff --check
+
+      - name: Commit source change
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit \
+            -m 'modprobe: preserve recursive option arguments' \
+            -m 'Escape generated MODPROBE_OPTIONS arguments and parse quoted or backslash-escaped values without changing pathname identity. Reject incomplete quoting instead of silently accepting a truncated argument vector.' \
+            -m 'Add native coverage for recursive config paths containing spaces, existing quote forms, backslash escaping, repeated whitespace, and malformed input.'
+          git push origin HEAD:fix/modprobe-options-config-path
