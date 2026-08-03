@@ -35,13 +35,19 @@ jobs:
 
       - name: Apply exact patches
         run: |
-          sha256sum .github/modprobe-options.patch .github/modprobe-options-empty-argument.patch
+          sha256sum \
+            .github/modprobe-options.patch \
+            .github/modprobe-options-empty-argument.patch \
+            .github/modprobe-options-append-errors.patch
           git apply --check .github/modprobe-options.patch
           git apply .github/modprobe-options.patch
           git apply --check .github/modprobe-options-empty-argument.patch
           git apply .github/modprobe-options-empty-argument.patch
+          git apply --check .github/modprobe-options-append-errors.patch
+          git apply .github/modprobe-options-append-errors.patch
           rm .github/modprobe-options.patch
           rm .github/modprobe-options-empty-argument.patch
+          rm .github/modprobe-options-append-errors.patch
           rm .github/workflows/bootstrap-modprobe-options.yml
           git diff --check
 
@@ -76,6 +82,6 @@ jobs:
           git add -A
           git commit \
             -m 'modprobe: preserve recursive option arguments' \
-            -m 'Escape generated MODPROBE_OPTIONS arguments and parse quoted or backslash-escaped values without changing pathname identity, including empty values. Reject incomplete quoting instead of silently accepting a truncated argument vector.' \
+            -m 'Escape generated MODPROBE_OPTIONS arguments and parse quoted or backslash-escaped values without changing pathname identity, including empty values. Reject incomplete quoting and stop when recursive option propagation cannot be completed.' \
             -m 'Add native coverage for recursive config paths containing spaces, repeated options with an empty value, existing quote forms, backslash escaping, repeated whitespace, and malformed input.'
           git push origin HEAD:fix/modprobe-options-config-path
