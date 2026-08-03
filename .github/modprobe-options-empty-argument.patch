@@ -1,0 +1,63 @@
+diff --git a/testsuite/test-modprobe.c b/testsuite/test-modprobe.c
+index 84917f7..c0a28df 100644
+--- a/testsuite/test-modprobe.c
++++ b/testsuite/test-modprobe.c
+@@ -42,6 +42,29 @@ DEFINE_TEST(modprobe_options_config_path,
+ 	.modules_loaded = "",
+ 	);
+ 
++static int modprobe_options_empty_config_path(void)
++{
++	return EXEC_TOOL(modprobe, "-C", MODPROBE_OPTIONS_CONFIG, "-C", "", "mod-loop-b");
++}
++DEFINE_TEST(modprobe_options_empty_config_path,
++	.description = "check recursive modprobe preserves an empty option argument",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = MODPROBE_OPTIONS_ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE", TOOLS_DIR "/modprobe" },
++		{ }
++		},
++	.output = {
++		.out = MODPROBE_OPTIONS_CORRECT,
++	},
++	.modules_loaded = "",
++	);
++
+ static int modprobe_options_show_alias(void)
+ {
+ 	return EXEC_TOOL(modprobe, "--show-alias", "recursive-marker");
+diff --git a/tools/modprobe.c b/tools/modprobe.c
+index 2a782ad..7c1d55d 100644
+--- a/tools/modprobe.c
++++ b/tools/modprobe.c
+@@ -47,6 +47,8 @@ static void env_modprobe_options_append(const char *value)
+ 		if (env_modprobe_options_needs_escape((unsigned char)*p))
+ 			escapes++;
+ 	}
++	if (valuelen == 0)
++		escapes = 2;
+ 
+ 	if (uaddsz_overflow(oldlen, valuelen, &len) ||
+ 	    uaddsz_overflow(len, escapes, &len) ||
+@@ -70,10 +72,15 @@ static void env_modprobe_options_append(const char *value)
+ 		*q++ = ' ';
+ 	}
+ 
+-	for (p = value; *p != '\0'; p++) {
+-		if (env_modprobe_options_needs_escape((unsigned char)*p))
+-			*q++ = '\\';
+-		*q++ = *p;
++	if (valuelen == 0) {
++		*q++ = '\'';
++		*q++ = '\'';
++	} else {
++		for (p = value; *p != '\0'; p++) {
++			if (env_modprobe_options_needs_escape((unsigned char)*p))
++				*q++ = '\\';
++			*q++ = *p;
++		}
+ 	}
+ 	*q = '\0';
