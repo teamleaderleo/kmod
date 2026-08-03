@@ -1,0 +1,85 @@
+diff --git a/tools/modprobe.c b/tools/modprobe.c
+index 7c1d55d..2d79a48 100644
+--- a/tools/modprobe.c
++++ b/tools/modprobe.c
+@@ -36,7 +36,7 @@ static bool env_modprobe_options_needs_escape(unsigned char c)
+ 	return isspace(c) || c == '\\' || c == '\'' || c == '"';
+ }
+ 
+-static void env_modprobe_options_append(const char *value)
++static int env_modprobe_options_append(const char *value)
+ {
+ 	const char *old = getenv("MODPROBE_OPTIONS");
+ 	const char *p;
+@@ -55,13 +55,13 @@ static void env_modprobe_options_append(const char *value)
+ 	    uaddsz_overflow(len, escapes, &len) ||
+ 	    uaddsz_overflow(len, oldlen > 0 ? 2 : 1, &len)) {
+ 		ERR("could not append value to $MODPROBE_OPTIONS: value too large\n");
+-		return;
++		return -EOVERFLOW;
+ 	}
+ 
+ 	env = malloc(len);
+ 	if (env == NULL) {
+ 		ERR("could not append value to $MODPROBE_OPTIONS: out-of-memory\n");
+-		return;
++		return -ENOMEM;
+ 	}
+ 
+ 	q = env;
+@@ -86,9 +86,17 @@ static void env_modprobe_options_append(const char *value)
+ 	}
+ 	*q = '\0';
+ 
+-	if (setenv("MODPROBE_OPTIONS", env, 1) < 0)
++	if (setenv("MODPROBE_OPTIONS", env, 1) < 0) {
++		int err = -errno;
++
+ 		ERR("could not setenv(MODPROBE_OPTIONS, \"%s\")\n", env);
++		free(env);
++		return err;
++	}
++
+ 	free(env);
++	return 0;
+ }
+ 
+ static char **prepend_options_from_env(int *p_argc, char **orig_argv)
+@@ -270,8 +278,12 @@ static int do_modprobe(int argc, char **orig_argv)
+ 			config_paths[n_config_paths] = NULL;
+ 
+-			env_modprobe_options_append("-C");
+-			env_modprobe_options_append(optarg);
++			err = env_modprobe_options_append("-C");
++			if (err < 0)
++				goto done;
++			err = env_modprobe_options_append(optarg);
++			if (err < 0)
++				goto done;
+ 			break;
+ 		}
+ 		case 'd':
+@@ -281,15 +293,24 @@ static int do_modprobe(int argc, char **orig_argv)
+ 			kversion = optarg;
+ 			break;
+ 		case 's':
+-			env_modprobe_options_append("-s");
++			err = env_modprobe_options_append("-s");
++			if (err < 0)
++				goto done;
+ 			use_syslog = true;
+ 			break;
+ 		case 'q':
+-			env_modprobe_options_append("-q");
++			err = env_modprobe_options_append("-q");
++			if (err < 0)
++				goto done;
+ 			verbose = LOG_EMERG;
+ 			break;
+ 		case 'v':
+-			env_modprobe_options_append("-v");
++			err = env_modprobe_options_append("-v");
++			if (err < 0)
++				goto done;
+ 			verbose++;
+ 			break;
