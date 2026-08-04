@@ -2,7 +2,7 @@ diff --git a/testsuite/test-modprobe.c b/testsuite/test-modprobe.c
 index 84917f7..c0a28df 100644
 --- a/testsuite/test-modprobe.c
 +++ b/testsuite/test-modprobe.c
-@@ -42,5 +42,25 @@ DEFINE_TEST(modprobe_options_config_path,
+@@ -42,6 +42,26 @@ DEFINE_TEST(modprobe_options_config_path,
  	.modules_loaded = "",
  	);
  
@@ -33,7 +33,7 @@ diff --git a/tools/modprobe.c b/tools/modprobe.c
 index 2a782ad..7c1d55d 100644
 --- a/tools/modprobe.c
 +++ b/tools/modprobe.c
-@@ -47,5 +47,7 @@ static void env_modprobe_options_append(const char *value)
+@@ -47,6 +47,8 @@ static void env_modprobe_options_append(const char *value)
  		if (env_modprobe_options_needs_escape((unsigned char)*p))
  			escapes++;
  	}
@@ -42,7 +42,7 @@ index 2a782ad..7c1d55d 100644
  
  	if (uaddsz_overflow(oldlen, valuelen, &len) ||
  	    uaddsz_overflow(len, escapes, &len) ||
-@@ -70,8 +72,13 @@ static void env_modprobe_options_append(const char *value)
+@@ -70,9 +72,14 @@ static void env_modprobe_options_append(const char *value)
  		*q++ = ' ';
  	}
  
