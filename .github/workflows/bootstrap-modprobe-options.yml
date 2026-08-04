@@ -58,16 +58,21 @@ jobs:
 
       - name: Require source-only materialized diff
         run: |
-          git diff --name-only \
-            5086df53090b2fe9fa1c31351c05a78a12a4ba71 -- \
-            > materialized-files.txt
-          cat > expected-materialized-files.txt <<'EOF'
+          actual="$(mktemp)"
+          expected="$(mktemp)"
+          trap 'rm -f "$actual" "$expected"' EXIT
+          {
+            git diff --name-only \
+              5086df53090b2fe9fa1c31351c05a78a12a4ba71 --
+            git ls-files --others --exclude-standard
+          } | LC_ALL=C sort -u > "$actual"
+          cat > "$expected" <<'EOF'
           testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/config dir/modprobe.conf
           testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt
           testsuite/test-modprobe.c
           tools/modprobe.c
           EOF
-          diff -u expected-materialized-files.txt materialized-files.txt
+          diff -u "$expected" "$actual"
 
       - name: Format check
         run: clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
