@@ -1,0 +1,12 @@
+diff --git a/testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/config dir/modprobe.conf b/testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/config dir/modprobe.conf
+index 292bb85..de40303 100644
+--- a/testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/config dir/modprobe.conf	
++++ b/testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/config dir/modprobe.conf	
+@@ -1,4 +1,4 @@
+ alias recursive-marker mod-loop-a
+-install mod-loop-b /bin/sh -c 'printf "%s %s\n" "${#KMOD_MODPROBE_OPTIONS_EXACT}" "${#MODPROBE_OPTIONS}" >> /exact-options-lengths.txt; exec "$MODPROBE" mod-loop-c'
+-install mod-loop-c /bin/sh -c 'printf "%s %s\n" "${#KMOD_MODPROBE_OPTIONS_EXACT}" "${#MODPROBE_OPTIONS}" >> /exact-options-lengths.txt; exec "$MODPROBE" mod-loop-d'
+-install mod-loop-d /bin/sh -c 'printf "%s %s\n" "${#KMOD_MODPROBE_OPTIONS_EXACT}" "${#MODPROBE_OPTIONS}" >> /exact-options-lengths.txt; exec "$MODPROBE" --show-alias recursive-marker'
++install mod-loop-b /bin/sh -c 'printf "%s %s\\n" "${#KMOD_MODPROBE_OPTIONS_EXACT}" "${#MODPROBE_OPTIONS}" >> /exact-options-lengths.txt; exec "$MODPROBE" mod-loop-c'
++install mod-loop-c /bin/sh -c 'printf "%s %s\\n" "${#KMOD_MODPROBE_OPTIONS_EXACT}" "${#MODPROBE_OPTIONS}" >> /exact-options-lengths.txt; exec "$MODPROBE" mod-loop-d'
++install mod-loop-d /bin/sh -c 'printf "%s %s\\n" "${#KMOD_MODPROBE_OPTIONS_EXACT}" "${#MODPROBE_OPTIONS}" >> /exact-options-lengths.txt; exec "$MODPROBE" --show-alias recursive-marker'
