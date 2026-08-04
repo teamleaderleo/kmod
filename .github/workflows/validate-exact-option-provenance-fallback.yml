@@ -54,12 +54,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          carrier=.github/modprobe-exact-option-provenance-fallback.patch.gz.b64
           gzip_file="$RUNNER_TEMP/modprobe-exact-option-provenance-fallback.patch.gz"
           patch="$RUNNER_TEMP/modprobe-exact-option-provenance-fallback.patch"
-          base64 --decode .github/modprobe-exact-option-provenance-fallback.patch.gz.b64 > "$gzip_file"
-          echo '00fba109da5b83ba99e6566f79dad8020c43f1551dd48834aaab107feef04fde  '"$gzip_file" | sha256sum --check
+          echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  '"$carrier" | sha256sum --check
+          base64 --decode "$carrier" > "$gzip_file"
+          sha256sum "$gzip_file" | tee "$RUNNER_TEMP/fallback-gzip.sha256"
           gzip --decompress --stdout "$gzip_file" > "$patch"
-          echo '4a2949348b5417b6a47f9578df4f50fb5ed8742bec173e09324560b14292cd66  '"$patch" | sha256sum --check
+          sha256sum "$patch" | tee "$RUNNER_TEMP/fallback-source-patch.sha256"
           git apply --check --index "$patch"
           git apply --index "$patch"
           git diff --cached --check
@@ -189,6 +191,8 @@ jobs:
           cp "$RUNNER_TEMP"/carrier-head.txt \
              "$RUNNER_TEMP"/source-base.txt \
              "$RUNNER_TEMP"/carrier-status-before.txt \
+             "$RUNNER_TEMP"/fallback-gzip.sha256 \
+             "$RUNNER_TEMP"/fallback-source-patch.sha256 \
              "$RUNNER_TEMP"/materialized-fallback.patch \
              "$RUNNER_TEMP"/materialized-fallback.sha256 \
              "$RUNNER_TEMP"/modprobe-version-${{ matrix.compiler }}.txt \
