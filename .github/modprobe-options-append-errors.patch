@@ -27,7 +27,7 @@ index 7c1d55d..2d79a48 100644
  	}
  
  	q = env;
-@@ -86,9 +86,17 @@ static void env_modprobe_options_append(const char *value)
+@@ -86,9 +86,16 @@ static void env_modprobe_options_append(const char *value)
  	}
  	*q = '\0';
  
@@ -45,7 +45,7 @@ index 7c1d55d..2d79a48 100644
  }
  
  static char **prepend_options_from_env(int *p_argc, char **orig_argv)
-@@ -270,8 +278,12 @@ static int do_modprobe(int argc, char **orig_argv)
+@@ -270,7 +278,11 @@ static int do_modprobe(int argc, char **orig_argv)
  			config_paths[n_config_paths] = NULL;
  
 -			env_modprobe_options_append("-C");
@@ -59,7 +59,7 @@ index 7c1d55d..2d79a48 100644
  			break;
  		}
  		case 'd':
-@@ -281,15 +293,24 @@ static int do_modprobe(int argc, char **orig_argv)
+@@ -281,14 +293,20 @@ static int do_modprobe(int argc, char **orig_argv)
  			kversion = optarg;
  			break;
  		case 's':
