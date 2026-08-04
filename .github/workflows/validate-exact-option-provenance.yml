@@ -114,6 +114,10 @@ jobs:
         shell: bash
         run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
 
+      - name: Check materialized source formatting
+        shell: bash
+        run: clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
+
       - name: Configure and build with sanitizers
         shell: bash
         env:
