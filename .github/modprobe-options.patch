@@ -1,0 +1,357 @@
+diff --git a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/config dir/modprobe.conf b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/config dir/modprobe.conf
+new file mode 100644
+index 0000000..79541b2
+--- /dev/null
++++ b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/config dir/modprobe.conf	
+@@ -0,0 +1,2 @@
++alias recursive-marker mod-loop-a
++install mod-loop-b $MODPROBE --show-alias recursive-marker
+diff --git a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt
+new file mode 100644
+index 0000000..ab3c394
+--- /dev/null
++++ b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt
+@@ -0,0 +1 @@
++mod-loop-a
+diff --git a/testsuite/test-modprobe.c b/testsuite/test-modprobe.c
+index 5ae9ec8..84917f7 100644
+--- a/testsuite/test-modprobe.c
++++ b/testsuite/test-modprobe.c
+@@ -16,6 +16,121 @@ DEFINE_TEST(modprobe_install_cmd_loop,
+ 	.modules_loaded = "mod-loop-b,mod-loop-a",
+ 	);
+ 
++#define MODPROBE_OPTIONS_ROOTFS TESTSUITE_ROOTFS "test-modprobe/install-cmd-loop"
++#define MODPROBE_OPTIONS_CONFIG "/config dir"
++#define MODPROBE_OPTIONS_CORRECT MODPROBE_OPTIONS_ROOTFS "/correct-options.txt"
++
++static int modprobe_options_config_path(void)
++{
++	return EXEC_TOOL(modprobe, "-C", MODPROBE_OPTIONS_CONFIG, "mod-loop-b");
++}
++DEFINE_TEST(modprobe_options_config_path,
++	.description = "check recursive modprobe preserves a config path containing spaces",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = MODPROBE_OPTIONS_ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE", TOOLS_DIR "/modprobe" },
++		{ }
++		},
++	.output = {
++		.out = MODPROBE_OPTIONS_CORRECT,
++	},
++	.modules_loaded = "",
++	);
++
++static int modprobe_options_show_alias(void)
++{
++	return EXEC_TOOL(modprobe, "--show-alias", "recursive-marker");
++}
++DEFINE_TEST_WITH_FUNC(modprobe_options_env_backslash, modprobe_options_show_alias,
++	.description = "check MODPROBE_OPTIONS accepts backslash-escaped whitespace",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = MODPROBE_OPTIONS_ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "-C /config\\ dir" },
++		{ }
++		},
++	.output = {
++		.out = MODPROBE_OPTIONS_CORRECT,
++	},
++	.modules_loaded = "",
++	);
++DEFINE_TEST_WITH_FUNC(modprobe_options_env_double_quote, modprobe_options_show_alias,
++	.description = "check MODPROBE_OPTIONS accepts double-quoted arguments",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = MODPROBE_OPTIONS_ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "-C \"/config dir\"" },
++		{ }
++		},
++	.output = {
++		.out = MODPROBE_OPTIONS_CORRECT,
++	},
++	.modules_loaded = "",
++	);
++DEFINE_TEST_WITH_FUNC(modprobe_options_env_single_quote, modprobe_options_show_alias,
++	.description = "check MODPROBE_OPTIONS accepts single-quoted arguments",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = MODPROBE_OPTIONS_ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "-C '/config dir'" },
++		{ }
++		},
++	.output = {
++		.out = MODPROBE_OPTIONS_CORRECT,
++	},
++	.modules_loaded = "",
++	);
++DEFINE_TEST_WITH_FUNC(modprobe_options_env_whitespace, modprobe_options_show_alias,
++	.description = "check MODPROBE_OPTIONS ignores repeated spaces and tabs",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = MODPROBE_OPTIONS_ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "\t-C  \t/config\\ dir\t" },
++		{ }
++		},
++	.output = {
++		.out = MODPROBE_OPTIONS_CORRECT,
++	},
++	.modules_loaded = "",
++	);
++DEFINE_TEST_WITH_FUNC(modprobe_options_env_unterminated_quote, modprobe_options_show_alias,
++	.description = "check MODPROBE_OPTIONS rejects an unterminated quote",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = MODPROBE_OPTIONS_ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "-C \"/config dir" },
++		{ }
++		},
++	.expected_fail = true,
++	.modules_loaded = "",
++	);
++DEFINE_TEST_WITH_FUNC(modprobe_options_env_trailing_escape, modprobe_options_show_alias,
++	.description = "check MODPROBE_OPTIONS rejects a trailing escape",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = MODPROBE_OPTIONS_ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "-C /config\\" },
++		{ }
++		},
++	.expected_fail = true,
++	.modules_loaded = "",
++	);
++
+ static int modprobe_param_kcmdline_show_deps(void)
+ {
+ 	return EXEC_TOOL(modprobe, "--show-depends", "mod-simple");
+diff --git a/tools/modprobe.c b/tools/modprobe.c
+index a6950ec..2a782ad 100644
+--- a/tools/modprobe.c
++++ b/tools/modprobe.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <assert.h>
++#include <ctype.h>
+ #include <errno.h>
+ #include <getopt.h>
+ #include <limits.h>
+@@ -30,21 +31,52 @@ static int insmod_all(struct kmod_ctx *ctx, char **args, int nargs)
+ 	return err;
+ }
+ 
++static bool env_modprobe_options_needs_escape(unsigned char c)
++{
++	return isspace(c) || c == '\\' || c == '\'' || c == '"';
++}
++
+ static void env_modprobe_options_append(const char *value)
+ {
+ 	const char *old = getenv("MODPROBE_OPTIONS");
+-	char *env;
++	const char *p;
++	char *env, *q;
++	size_t oldlen = old == NULL ? 0 : strlen(old);
++	size_t valuelen = strlen(value);
++	size_t escapes = 0, len;
++
++	for (p = value; *p != '\0'; p++) {
++		if (env_modprobe_options_needs_escape((unsigned char)*p))
++			escapes++;
++	}
+ 
+-	if (old == NULL) {
+-		setenv("MODPROBE_OPTIONS", value, 1);
++	if (uaddsz_overflow(oldlen, valuelen, &len) ||
++	    uaddsz_overflow(len, escapes, &len) ||
++	    uaddsz_overflow(len, oldlen > 0 ? 2 : 1, &len)) {
++		ERR("could not append value to $MODPROBE_OPTIONS: value too large\n");
+ 		return;
+ 	}
+ 
+-	if (asprintf(&env, "%s %s", old, value) < 0) {
+-		ERR("could not append value to $MODPROBE_OPTIONS\n");
++	env = malloc(len);
++	if (env == NULL) {
++		ERR("could not append value to $MODPROBE_OPTIONS: out-of-memory\n");
+ 		return;
+ 	}
+ 
++	q = env;
++	if (oldlen > 0) {
++		memcpy(q, old, oldlen);
++		q += oldlen;
++		*q++ = ' ';
++	}
++
++	for (p = value; *p != '\0'; p++) {
++		if (env_modprobe_options_needs_escape((unsigned char)*p))
++			*q++ = '\\';
++		*q++ = *p;
++	}
++	*q = '\0';
++
+ 	if (setenv("MODPROBE_OPTIONS", env, 1) < 0)
+ 		ERR("could not setenv(MODPROBE_OPTIONS, \"%s\")\n", env);
+ 	free(env);
+@@ -52,64 +84,76 @@ static void env_modprobe_options_append(const char *value)
+ 
+ static char **prepend_options_from_env(int *p_argc, char **orig_argv)
+ {
+-	const char *p, *env = getenv("MODPROBE_OPTIONS");
+-	char **new_argv, *str_end, *str, *s, *quote;
++	const char *env = getenv("MODPROBE_OPTIONS");
++	const char *p;
++	char **new_argv;
++	char *str;
+ 	int i, argc = *p_argc;
+-	size_t envlen, space_count = 0;
++	size_t envlen, n_ptrs, pointer_bytes, string_bytes, alloc_size;
+ 
+ 	if (env == NULL)
+ 		return orig_argv;
+ 
+-	for (p = env; *p != '\0'; p++) {
+-		if (*p == ' ')
+-			space_count++;
++	envlen = strlen(env);
++	if (uaddsz_overflow((size_t)argc, envlen, &n_ptrs) ||
++	    uaddsz_overflow(n_ptrs, 2, &n_ptrs) ||
++	    umulsz_overflow(n_ptrs, sizeof(char *), &pointer_bytes) ||
++	    uaddsz_overflow(envlen, 1, &string_bytes) ||
++	    uaddsz_overflow(pointer_bytes, string_bytes, &alloc_size)) {
++		ERR("could not parse $MODPROBE_OPTIONS: value too large\n");
++		return NULL;
+ 	}
+ 
+-	envlen = p - env;
+-	new_argv = malloc(sizeof(char *) * (argc + space_count + 3 + envlen));
+-	if (new_argv == NULL)
++	new_argv = malloc(alloc_size);
++	if (new_argv == NULL) {
++		ERR("could not parse $MODPROBE_OPTIONS: out-of-memory\n");
+ 		return NULL;
++	}
+ 
+ 	new_argv[0] = orig_argv[0];
+-	str = (char *)(new_argv + argc + space_count + 3);
+-	memcpy(str, env, envlen + 1);
+-
+-	str_end = str + envlen;
+-
+-	quote = NULL;
+-	for (i = 1, s = str; *s != '\0'; s++) {
+-		if (quote == NULL) {
+-			if (*s == ' ') {
+-				new_argv[i] = str;
+-				i++;
+-				*s = '\0';
+-				str = s + 1;
+-			} else if (*s == '"' || *s == '\'')
+-				quote = s;
+-		} else {
+-			if (*s == *quote) {
+-				if (quote == str) {
+-					new_argv[i] = str + 1;
+-					i++;
+-					*s = '\0';
+-					str = s + 1;
+-				} else {
+-					char *it;
+-					for (it = quote; it < s - 1; it++)
+-						it[0] = it[1];
+-					for (it = s - 1; it < str_end - 2; it++)
+-						it[0] = it[2];
+-					str_end -= 2;
+-					*str_end = '\0';
+-					s -= 2;
++	str = (char *)(new_argv + n_ptrs);
++
++	for (i = 1, p = env;;) {
++		char quote = '\0';
++
++		while (isspace((unsigned char)*p))
++			p++;
++		if (*p == '\0')
++			break;
++
++		new_argv[i++] = str;
++		for (;;) {
++			unsigned char c = (unsigned char)*p;
++
++			if (c == '\0') {
++				if (quote != '\0')
++					goto invalid;
++				break;
++			}
++
++			if (quote == '\0') {
++				if (isspace(c))
++					break;
++				if (c == '\\') {
++					p++;
++					if (*p == '\0')
++						goto invalid;
++					*str++ = *p++;
++					continue;
+ 				}
+-				quote = NULL;
++				if (c == '\'' || c == '"') {
++					quote = *p++;
++					continue;
++				}
++			} else if (c == (unsigned char)quote) {
++				quote = '\0';
++				p++;
++				continue;
+ 			}
++
++			*str++ = *p++;
+ 		}
+-	}
+-	if (str < s) {
+-		new_argv[i] = str;
+-		i++;
++		*str++ = '\0';
+ 	}
+ 
+ 	memcpy(new_argv + i, orig_argv + 1, sizeof(char *) * (argc - 1));
+@@ -117,6 +161,11 @@ static char **prepend_options_from_env(int *p_argc, char **orig_argv)
+ 	*p_argc = i + argc - 1;
+ 
+ 	return new_argv;
++
++invalid:
++	ERR("could not parse $MODPROBE_OPTIONS: invalid quoting\n");
++	free(new_argv);
++	return NULL;
+ }
+ 
+ static int do_modprobe(int argc, char **orig_argv)
+@@ -139,10 +188,8 @@ static int do_modprobe(int argc, char **orig_argv)
+ 	bool use_syslog = false;
+ 
+ 	argv = prepend_options_from_env(&argc, orig_argv);
+-	if (argv == NULL) {
+-		ERR("Could not prepend options from environment\n");
++	if (argv == NULL)
+ 		return EXIT_FAILURE;
+-	}
+ 
+ 	for (;;) {
+ 		int c, idx = 0;

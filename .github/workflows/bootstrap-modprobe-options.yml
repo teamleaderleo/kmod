@@ -1,0 +1,105 @@
+# Temporary validation carrier. The workflow applies the retained patches in
+# the runner only and never rewrites the branch while compatibility review is open.
+name: Validate modprobe option transport
+
+on:
+  push:
+    branches:
+      - fix/modprobe-options-config-path
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modprobe-options-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply-build-test:
+    runs-on: ubuntu-24.04
+    env:
+      KDIR: any
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact carrier ancestry
+        run: |
+          test "$(git merge-base HEAD 5086df53090b2fe9fa1c31351c05a78a12a4ba71)" = \
+            "5086df53090b2fe9fa1c31351c05a78a12a4ba71"
+
+      - name: Setup OS
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Apply exact patches in runner
+        run: |
+          sha256sum \
+            .github/modprobe-options.patch \
+            .github/modprobe-options-empty-argument.patch \
+            .github/modprobe-options-append-errors.patch
+          git apply --check .github/modprobe-options.patch
+          git apply .github/modprobe-options.patch
+          git apply --check .github/modprobe-options-empty-argument.patch
+          git apply .github/modprobe-options-empty-argument.patch
+          git apply --check .github/modprobe-options-append-errors.patch
+          git apply .github/modprobe-options-append-errors.patch
+          rm .github/modprobe-options.patch
+          rm .github/modprobe-options-empty-argument.patch
+          rm .github/modprobe-options-append-errors.patch
+          rm .github/workflows/bootstrap-modprobe-options.yml
+          git diff --check 5086df53090b2fe9fa1c31351c05a78a12a4ba71
+
+      - name: Require source-only materialized diff
+        run: |
+          actual="$(mktemp)"
+          expected="$(mktemp)"
+          trap 'rm -f "$actual" "$expected"' EXIT
+          {
+            git diff --name-only \
+              5086df53090b2fe9fa1c31351c05a78a12a4ba71 --
+            git ls-files --others --exclude-standard
+          } | LC_ALL=C sort -u > "$actual"
+          cat > "$expected" <<'EOF'
+          testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/config dir/modprobe.conf
+          testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-options.txt
+          testsuite/test-modprobe.c
+          tools/modprobe.c
+          EOF
+          diff -u "$expected" "$actual"
+
+      - name: Format check
+        run: clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
+
+      - name: GCC configure and build
+        env:
+          CC: gcc
+        run: |
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled build-gcc
+          meson compile -C build-gcc
+
+      - name: GCC test
+        run: meson test -C build-gcc || meson test -C build-gcc --verbose
+
+      - name: Clang configure and build
+        env:
+          CC: clang
+        run: |
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled build-clang
+          meson compile -C build-clang
+
+      - name: Clang test
+        run: meson test -C build-clang || meson test -C build-clang --verbose
+
+      - name: Verify carrier branch remains unchanged
+        if: always()
+        run: |
+          git reset --hard HEAD
+          git clean -fdx
+          test -z "$(git status --short)"
