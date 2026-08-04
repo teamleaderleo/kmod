@@ -53,9 +53,29 @@ jobs:
         run: |
           set -euo pipefail
           patch="$RUNNER_TEMP/exact-option-record-v2.patch"
-          cat .github/exact-option-record-v2.patch.b64.part* | base64 --decode > "$patch"
-          echo 'a998c4280e944716287e4c862e1f6bec1c76df9d4178cb3947dc8bd99141850c  '"$patch" | sha256sum --check
-          echo '6e5367da976d2304a1c8bf31ae0757d2ad5831ea884c11955a828c5acaf98fcd  .github/exact-option-record-v2-fixture.patch' | sha256sum --check
+          fragment_receipt="$RUNNER_TEMP/v2-fragments.sha256"
+          cat > "$fragment_receipt" <<'EOF_HASHES'
+          45e430bf462ff78785e29b9c86ed941b850b80194e2dfaf924b20cc57722c30d  .github/exact-option-record-v2.patch.b64.part00
+          af826644f17671a8e30ea123a3926f5127cefd1198192859dc99e4155b5d1311  .github/exact-option-record-v2.patch.b64.part01
+          9d5ff4bce3d87e4be6290c7e7a422c1df8e1ba48bc170821425128e35c554f65  .github/exact-option-record-v2.patch.b64.part02
+          9ad88cf31458001114e9ac3dd5dfc26750f0526deb81bb4433b642bcd59ea42c  .github/exact-option-record-v2.patch.b64.part03
+          2b6b21c8d6e9d1e1ffc51fe2972ba5554d415e65bed25d76ec29df5d09c31dfb  .github/exact-option-record-v2.patch.b64.part04
+          fe34466e0ca61fc4629e858f5277ac6294fd68a82a14d2a06c2d2eeb68cd0abc  .github/exact-option-record-v2.patch.b64.part05
+          ee2da82363aefea4e3bfce40ddb58ba51cf4449da3586cfe32237909ac6f8616  .github/exact-option-record-v2.patch.b64.part06
+          6e5367da976d2304a1c8bf31ae0757d2ad5831ea884c11955a828c5acaf98fcd  .github/exact-option-record-v2-fixture.patch
+          EOF_HASHES
+          sha256sum --check "$fragment_receipt"
+          parts=(
+            .github/exact-option-record-v2.patch.b64.part00
+            .github/exact-option-record-v2.patch.b64.part01
+            .github/exact-option-record-v2.patch.b64.part02
+            .github/exact-option-record-v2.patch.b64.part03
+            .github/exact-option-record-v2.patch.b64.part04
+            .github/exact-option-record-v2.patch.b64.part05
+            .github/exact-option-record-v2.patch.b64.part06
+          )
+          cat "${parts[@]}" | base64 --decode > "$patch"
+          sha256sum "$patch" | tee "$RUNNER_TEMP/reconstructed-v2.sha256"
           git apply --check --index "$patch"
           git apply --index "$patch"
           git apply --check --index .github/exact-option-record-v2-fixture.patch
@@ -159,6 +179,8 @@ jobs:
           cp "$RUNNER_TEMP"/carrier-head.txt \
              "$RUNNER_TEMP"/source-base.txt \
              "$RUNNER_TEMP"/carrier-status-before.txt \
+             "$RUNNER_TEMP"/v2-fragments.sha256 \
+             "$RUNNER_TEMP"/reconstructed-v2.sha256 \
              "$RUNNER_TEMP"/materialized-v2.patch \
              "$RUNNER_TEMP"/materialized-v2.sha256 \
              "$RUNNER_TEMP"/modprobe-version-${{ matrix.compiler }}.txt \
