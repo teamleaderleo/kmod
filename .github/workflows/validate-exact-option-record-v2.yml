@@ -55,8 +55,11 @@ jobs:
           patch="$RUNNER_TEMP/exact-option-record-v2.patch"
           cat .github/exact-option-record-v2.patch.b64.part* | base64 --decode > "$patch"
           echo 'a998c4280e944716287e4c862e1f6bec1c76df9d4178cb3947dc8bd99141850c  '"$patch" | sha256sum --check
+          echo '6e5367da976d2304a1c8bf31ae0757d2ad5831ea884c11955a828c5acaf98fcd  .github/exact-option-record-v2-fixture.patch' | sha256sum --check
           git apply --check --index "$patch"
           git apply --index "$patch"
+          git apply --check --index .github/exact-option-record-v2-fixture.patch
+          git apply --index .github/exact-option-record-v2-fixture.patch
           git diff --cached --check
           git diff --cached --binary > "$RUNNER_TEMP/materialized-v2.patch"
           sha256sum "$RUNNER_TEMP/materialized-v2.patch" > "$RUNNER_TEMP/materialized-v2.sha256"
@@ -166,7 +169,8 @@ jobs:
           if [[ -x build-${{ matrix.compiler }}/modprobe ]]; then
             sha256sum build-${{ matrix.compiler }}/modprobe > "$out/modprobe.sha256"
           fi
-          sha256sum .github/exact-option-record-v2.patch.b64.part* > "$out/fragments.sha256"
+          sha256sum .github/exact-option-record-v2.patch.b64.part* \
+            .github/exact-option-record-v2-fixture.patch > "$out/carriers.sha256"
           git diff --cached --name-status > "$out/materialized-files.txt"
 
       - name: Restore carrier state
