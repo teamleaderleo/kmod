@@ -116,6 +116,9 @@ jobs:
             "${extra[@]}" \
             build-${{ matrix.compiler }}
           meson compile -C build-${{ matrix.compiler }}
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
           "build-${{ matrix.compiler }}/modprobe" --version | \
             tee "$RUNNER_TEMP/modprobe-version-${{ matrix.compiler }}.txt"
 
