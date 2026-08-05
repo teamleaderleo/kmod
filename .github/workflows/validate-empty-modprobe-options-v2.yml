@@ -1,0 +1,170 @@
+name: Validate empty MODPROBE_OPTIONS v2
+
+on:
+  push:
+    branches:
+      - fix/modprobe-empty-options-environment
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: empty-modprobe-options-v2-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline-and-candidate:
+    name: empty environment (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      KDIR: any
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Check out exact carrier branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: fix/modprobe-empty-options-environment
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify source and carrier identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=5086df53090b2fe9fa1c31351c05a78a12a4ba71
+          test "$(git merge-base HEAD "$base")" = "$base"
+          test "$(git rev-parse "$base:tools/modprobe.c")" = \
+            413960cae0f39945a3f2d6509dc4a8c262ae2609
+          git diff --quiet "$base" -- . ':(exclude).github'
+          echo '27048a0feb47fc3ea70c8d905ebb5e97e76a30bd7b59e72039a7260c93ba3bf6  .github/modprobe-empty-options-environment.patch' | sha256sum --check
+          git status --short | tee "$RUNNER_TEMP/status-before.txt"
+          test ! -s "$RUNNER_TEMP/status-before.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/carrier-head.txt"
+
+      - name: Set up build dependencies
+        shell: bash
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Build exact losing baseline
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            extra+=("-Db_lundef=false")
+          fi
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled \
+            "${extra[@]}" build-baseline-${{ matrix.compiler }}
+          meson compile -C build-baseline-${{ matrix.compiler }}
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          set +e
+          MODPROBE_OPTIONS='' build-baseline-${{ matrix.compiler }}/modprobe --version \
+            > "$RUNNER_TEMP/baseline-${{ matrix.compiler }}.out" \
+            2> "$RUNNER_TEMP/baseline-${{ matrix.compiler }}.err"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$RUNNER_TEMP/baseline-${{ matrix.compiler }}.status"
+          test "$status" -ne 0
+          grep -q 'AddressSanitizer: heap-buffer-overflow' \
+            "$RUNNER_TEMP/baseline-${{ matrix.compiler }}.err"
+          rm -rf build-baseline-${{ matrix.compiler }}
+
+      - name: Apply and inspect minimal candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check --index .github/modprobe-empty-options-environment.patch
+          git apply --index .github/modprobe-empty-options-environment.patch
+          git diff --cached --check
+          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = \
+            "testsuite/test-modprobe.c tools/modprobe.c "
+          clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
+          git diff --cached --binary > "$RUNNER_TEMP/materialized-empty-env.patch"
+          sha256sum "$RUNNER_TEMP/materialized-empty-env.patch" > \
+            "$RUNNER_TEMP/materialized-empty-env.sha256"
+
+      - name: Build and test candidate
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            extra+=("-Db_lundef=false")
+          fi
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled \
+            "${extra[@]}" build-${{ matrix.compiler }}
+          meson compile -C build-${{ matrix.compiler }}
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          MODPROBE_OPTIONS='' build-${{ matrix.compiler }}/modprobe --version \
+            > "$RUNNER_TEMP/candidate-${{ matrix.compiler }}.out" \
+            2> "$RUNNER_TEMP/candidate-${{ matrix.compiler }}.err"
+          test ! -s "$RUNNER_TEMP/candidate-${{ matrix.compiler }}.err"
+          meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
+          meson test -C build-${{ matrix.compiler }} test-modprobe --verbose \
+            2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}.log"
+          meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
+          meson test -C build-${{ matrix.compiler }} --print-errorlogs \
+            2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
+          sha256sum build-${{ matrix.compiler }}/modprobe > \
+            "$RUNNER_TEMP/candidate-${{ matrix.compiler }}.sha256"
+
+      - name: Retain receipts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/empty-env-v2-${{ matrix.compiler }}"
+          mkdir -p "$out"
+          cp "$RUNNER_TEMP"/carrier-head.txt \
+             "$RUNNER_TEMP"/status-before.txt \
+             "$RUNNER_TEMP"/baseline-${{ matrix.compiler }}.out \
+             "$RUNNER_TEMP"/baseline-${{ matrix.compiler }}.err \
+             "$RUNNER_TEMP"/baseline-${{ matrix.compiler }}.status \
+             "$RUNNER_TEMP"/materialized-empty-env.patch \
+             "$RUNNER_TEMP"/materialized-empty-env.sha256 \
+             "$RUNNER_TEMP"/candidate-${{ matrix.compiler }}.out \
+             "$RUNNER_TEMP"/candidate-${{ matrix.compiler }}.err \
+             "$RUNNER_TEMP"/candidate-${{ matrix.compiler }}.sha256 \
+             "$RUNNER_TEMP"/focused-${{ matrix.compiler }}.log \
+             "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log \
+             "$out/" 2>/dev/null || true
+
+      - name: Restore carrier state
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git clean -fdx
+          git status --short | tee "$RUNNER_TEMP/status-after.txt"
+          test ! -s "$RUNNER_TEMP/status-after.txt"
+
+      - name: Upload receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmod-empty-options-v2-${{ matrix.compiler }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/empty-env-v2-${{ matrix.compiler }}/
+            ${{ runner.temp }}/status-after.txt
+          if-no-files-found: error
+          retention-days: 30
