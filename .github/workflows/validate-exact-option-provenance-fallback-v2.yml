@@ -1,0 +1,162 @@
+name: Validate exact option provenance fallback v2
+
+on:
+  push:
+    branches:
+      - experiment/modprobe-exact-option-provenance-fallback
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exact-option-provenance-fallback-v2-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply-build-test:
+    name: fallback v2 (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      KDIR: any
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Check out exact experiment branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: experiment/modprobe-exact-option-provenance-fallback
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact source base
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=5086df53090b2fe9fa1c31351c05a78a12a4ba71
+          test "$(git merge-base HEAD "$base")" = "$base"
+          test "$(git rev-parse "$base:tools/modprobe.c")" = \
+            413960cae0f39945a3f2d6509dc4a8c262ae2609
+          git diff --quiet "$base" -- . ':(exclude).github'
+          echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  .github/modprobe-exact-option-provenance-fallback.patch.gz.b64' | sha256sum --check
+          git status --short | tee "$RUNNER_TEMP/status-before.txt"
+          test ! -s "$RUNNER_TEMP/status-before.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/carrier-head.txt"
+
+      - name: Recover and apply fallback payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          carrier=.github/modprobe-exact-option-provenance-fallback.patch.gz.b64
+          gzip_file="$RUNNER_TEMP/fallback.patch.gz"
+          patch="$RUNNER_TEMP/fallback.patch"
+          base64 --decode "$carrier" > "$gzip_file"
+          sha256sum "$gzip_file" > "$RUNNER_TEMP/fallback-gzip.sha256"
+          set +e
+          gzip --decompress --stdout "$gzip_file" > "$patch" \
+            2> "$RUNNER_TEMP/fallback-gzip.err"
+          gzip_status=$?
+          set -e
+          printf '%s\n' "$gzip_status" > "$RUNNER_TEMP/fallback-gzip.status"
+          test -s "$patch"
+          sha256sum "$patch" > "$RUNNER_TEMP/fallback-source-patch.sha256"
+          git apply --check --index "$patch"
+          git apply --index "$patch"
+          git diff --cached --check
+          git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/materialized-files.txt"
+          test "$(wc -l < "$RUNNER_TEMP/materialized-files.txt")" -eq 29
+          echo '1439259c98f50a66778b71c6f7cc5ce442edbf484ad735316a49401ec747e435  '"$RUNNER_TEMP/materialized-files.txt" | sha256sum --check
+          git diff --cached --binary > "$RUNNER_TEMP/materialized-fallback.patch"
+          sha256sum "$RUNNER_TEMP/materialized-fallback.patch" > \
+            "$RUNNER_TEMP/materialized-fallback.sha256"
+
+      - name: Set up build dependencies
+        shell: bash
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Format, build, and test
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
+          extra=()
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            extra+=("-Db_lundef=false")
+          fi
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled \
+            "${extra[@]}" build-${{ matrix.compiler }}
+          meson compile -C build-${{ matrix.compiler }}
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          build-${{ matrix.compiler }}/modprobe --version | \
+            tee "$RUNNER_TEMP/modprobe-version-${{ matrix.compiler }}.txt"
+          for pass in first rerun; do
+            meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
+            meson test -C build-${{ matrix.compiler }} test-modprobe --verbose \
+              2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+          done
+          meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
+          meson test -C build-${{ matrix.compiler }} --print-errorlogs \
+            2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
+          python3 .github/test-modprobe-option-provenance-fallback.py \
+            "$PWD/build-${{ matrix.compiler }}/modprobe" \
+            > "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
+          sha256sum build-${{ matrix.compiler }}/modprobe > \
+            "$RUNNER_TEMP/modprobe-${{ matrix.compiler }}.sha256"
+
+      - name: Retain receipts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/fallback-v2-${{ matrix.compiler }}"
+          mkdir -p "$out"
+          cp "$RUNNER_TEMP"/carrier-head.txt \
+             "$RUNNER_TEMP"/status-before.txt \
+             "$RUNNER_TEMP"/fallback-gzip.sha256 \
+             "$RUNNER_TEMP"/fallback-gzip.err \
+             "$RUNNER_TEMP"/fallback-gzip.status \
+             "$RUNNER_TEMP"/fallback-source-patch.sha256 \
+             "$RUNNER_TEMP"/materialized-files.txt \
+             "$RUNNER_TEMP"/materialized-fallback.patch \
+             "$RUNNER_TEMP"/materialized-fallback.sha256 \
+             "$RUNNER_TEMP"/modprobe-version-${{ matrix.compiler }}.txt \
+             "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log \
+             "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log \
+             "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log \
+             "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json \
+             "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 \
+             "$out/" 2>/dev/null || true
+
+      - name: Restore carrier state
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git clean -fdx
+          git status --short | tee "$RUNNER_TEMP/status-after.txt"
+          test ! -s "$RUNNER_TEMP/status-after.txt"
+
+      - name: Upload receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmod-fallback-v2-${{ matrix.compiler }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fallback-v2-${{ matrix.compiler }}/
+            ${{ runner.temp }}/status-after.txt
+          if-no-files-found: error
+          retention-days: 30
