@@ -15,7 +15,7 @@ index 6b62644..2e38ba3 100644
 +	.env_vars = (const struct keyval[]) {
 +		{ "MODPROBE_OPTIONS", "" },
 +		{ }
-+	},
++		},
 +	);
 +
  static int modprobe_param_kcmdline_show_deps(void)
