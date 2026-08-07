@@ -162,19 +162,28 @@ jobs:
           if [[ "${{ matrix.compiler }}" == clang ]]; then export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
           build-${{ matrix.compiler }}/modprobe --version > "$RUNNER_TEMP/version-${{ matrix.compiler }}.txt"
 
-          for pass in first rerun; do
-            meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
-            root="$PWD/build-${{ matrix.compiler }}/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
-            build-${{ matrix.compiler }}/depmod -b "$root" 4.4.4
-            test -s "$root/lib/modules/4.4.4/modules.dep.bin"
-            meson test -C build-${{ matrix.compiler }} test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
-            grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
-          done
-
+          # Meson's test-modprobe target depends on create-rootfs, and create-rootfs is
+          # always stale. Generate the depmod binary index once from a populated build
+          # root, then seed it into rootfs-pristine so every Meson-driven rootfs refresh
+          # carries the same valid index into the inherited-root fixture.
           meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
           root="$PWD/build-${{ matrix.compiler }}/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
           build-${{ matrix.compiler }}/depmod -b "$root" 4.4.4
+          generated="$root/lib/modules/4.4.4/modules.dep.bin"
+          seed="$PWD/testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep.bin"
+          test -s "$generated"
+          cp "$generated" "$seed"
+          test -s "$seed"
+          sha256sum "$seed" > "$RUNNER_TEMP/provenance-modules.dep.bin-${{ matrix.compiler }}.sha256"
+
+          for pass in first rerun; do
+            meson test -C build-${{ matrix.compiler }} test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+            grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+            test -s "$root/lib/modules/4.4.4/modules.dep.bin"
+          done
+
           meson test -C build-${{ matrix.compiler }} --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
+          grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
           python3 "$RUNNER_TEMP/fallback-discriminator.py" "$PWD/build-${{ matrix.compiler }}/modprobe" > "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
           python3 -m json.tool "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
           sha256sum build-${{ matrix.compiler }}/modprobe > "$RUNNER_TEMP/modprobe-${{ matrix.compiler }}.sha256"
@@ -186,7 +195,7 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/reconstructed-${{ matrix.compiler }}"
           mkdir -p "$out"
-          cp "$RUNNER_TEMP"/reconstruction-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/files-before-repair.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/reconstructed-repaired.patch "$RUNNER_TEMP"/reconstructed-repaired.sha256 "$RUNNER_TEMP"/tools.diff "$RUNNER_TEMP"/tests.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
+          cp "$RUNNER_TEMP"/reconstruction-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/files-before-repair.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/reconstructed-repaired.patch "$RUNNER_TEMP"/reconstructed-repaired.sha256 "$RUNNER_TEMP"/tools.diff "$RUNNER_TEMP"/tests.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/provenance-modules.dep.bin-${{ matrix.compiler }}.sha256 "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
           git reset --hard HEAD
           git clean -fdx
           git status --short | tee "$RUNNER_TEMP/status-after.txt"
