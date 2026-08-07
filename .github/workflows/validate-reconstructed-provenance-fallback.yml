@@ -113,6 +113,7 @@ jobs:
           assert text.count(old) == 1
           p.write_text(text.replace(old, new))
           PY
+          clang-format -i tools/modprobe.c
           git add tools/modprobe.c
           git diff --cached --check
           clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
