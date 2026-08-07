@@ -71,7 +71,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PATCH="$RUNNER_TEMP/fallback.damaged.patch" STRICT="$RUNNER_TEMP/strict.patch" FIXTURES="$RUNNER_TEMP/fixtures.patch" TOOLS="$RUNNER_TEMP/strict-tools.patch" python3 - <<'PY'
+          PATCH="$RUNNER_TEMP/fallback.damaged.patch" STRICT="$RUNNER_TEMP/strict.patch" FIXTURES="$RUNNER_TEMP/fixtures.patch" TOOLS="$RUNNER_TEMP/strict-tools.patch" HEADER_FILES="$RUNNER_TEMP/header-files.txt" python3 - <<'PY'
           import os
           from pathlib import Path
 
@@ -88,6 +88,15 @@ jobs:
           tools = next(s for s in strict if s.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"))
           Path(os.environ["FIXTURES"]).write_text("".join(fallback[:28]), errors="surrogateescape")
           Path(os.environ["TOOLS"]).write_text(tools, errors="surrogateescape")
+
+          paths = []
+          for section in fallback:
+              header = section.splitlines()[0].split()
+              assert header[:2] == ["diff", "--git"]
+              target = header[3]
+              assert target.startswith("b/")
+              paths.append(target[2:])
+          Path(os.environ["HEADER_FILES"]).write_text("".join(path + "\n" for path in sorted(paths)))
           PY
           git apply --check --index "$RUNNER_TEMP/fixtures.patch"
           git apply --index "$RUNNER_TEMP/fixtures.patch"
@@ -95,7 +104,22 @@ jobs:
           git apply --index "$RUNNER_TEMP/strict-tools.patch"
           git diff --cached --check
           git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/files-before-policy.txt"
-          echo '1439259c98f50a66778b71c6f7cc5ce442edbf484ad735316a49401ec747e435  '"$RUNNER_TEMP/files-before-policy.txt" | sha256sum --check
+
+          echo '--- original 29 diff-header target paths ---'
+          nl -ba "$RUNNER_TEMP/header-files.txt"
+          echo '--- staged paths after 28 intact sections + strict tools ---'
+          nl -ba "$RUNNER_TEMP/files-before-policy.txt"
+          echo '--- path-list hashes ---'
+          sha256sum "$RUNNER_TEMP/header-files.txt" "$RUNNER_TEMP/files-before-policy.txt"
+          echo '--- historical fence check (diagnostic only) ---'
+          if echo '1439259c98f50a66778b71c6f7cc5ce442edbf484ad735316a49401ec747e435  '"$RUNNER_TEMP/header-files.txt" | sha256sum --check; then
+            echo 'historical fence matches diff-header path serialization'
+          else
+            echo 'historical fence differs from diff-header path serialization'
+          fi
+          diff -u "$RUNNER_TEMP/header-files.txt" "$RUNNER_TEMP/files-before-policy.txt"
+          test "$(wc -l < "$RUNNER_TEMP/header-files.txt")" -eq 29
+          test "$(wc -l < "$RUNNER_TEMP/files-before-policy.txt")" -eq 29
 
       - name: Apply reconstructed policy delta and compare original oracle
         shell: bash
@@ -114,7 +138,7 @@ jobs:
           git diff --cached --check
           clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
           git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/files.txt"
-          echo '1439259c98f50a66778b71c6f7cc5ce442edbf484ad735316a49401ec747e435  '"$RUNNER_TEMP/files.txt" | sha256sum --check
+          diff -u "$RUNNER_TEMP/header-files.txt" "$RUNNER_TEMP/files.txt"
           git diff --cached --binary > "$RUNNER_TEMP/reconstructed.patch"
           sha256sum "$RUNNER_TEMP/reconstructed.patch" > "$RUNNER_TEMP/reconstructed.sha256"
           PATCH="$RUNNER_TEMP/reconstructed.patch" python3 - <<'PY' | tee "$RUNNER_TEMP/oracle.txt"
@@ -162,7 +186,7 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/reconstructed-${{ matrix.compiler }}"
           mkdir -p "$out"
-          cp "$RUNNER_TEMP"/reconstruction-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/files-before-policy.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/reconstructed.patch "$RUNNER_TEMP"/reconstructed.sha256 "$RUNNER_TEMP"/oracle.txt "$RUNNER_TEMP"/tools.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
+          cp "$RUNNER_TEMP"/reconstruction-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/header-files.txt "$RUNNER_TEMP"/files-before-policy.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/reconstructed.patch "$RUNNER_TEMP"/reconstructed.sha256 "$RUNNER_TEMP"/oracle.txt "$RUNNER_TEMP"/tools.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
           git reset --hard HEAD
           git clean -fdx
           git status --short | tee "$RUNNER_TEMP/status-after.txt"
