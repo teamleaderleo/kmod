@@ -69,8 +69,73 @@ jobs:
           printf '%s\n' "$gzip_status" > "$RUNNER_TEMP/fallback-gzip.status"
           test -s "$patch"
           sha256sum "$patch" > "$RUNNER_TEMP/fallback-source-patch.sha256"
-          git apply --check --index "$patch"
-          git apply --index "$patch"
+
+          set +e
+          git apply --check --index "$patch" \
+            > "$RUNNER_TEMP/apply-normal.out" \
+            2> "$RUNNER_TEMP/apply-normal.err"
+          normal_status=$?
+          set -e
+          printf '%s\n' "$normal_status" > "$RUNNER_TEMP/apply-normal.status"
+
+          recovery_mode=normal
+          if [[ "$normal_status" -ne 0 ]]; then
+            set +e
+            git apply --recount --check --index "$patch" \
+              > "$RUNNER_TEMP/apply-recount.out" \
+              2> "$RUNNER_TEMP/apply-recount.err"
+            recount_status=$?
+            set -e
+            printf '%s\n' "$recount_status" > "$RUNNER_TEMP/apply-recount.status"
+            if [[ "$recount_status" -ne 0 ]]; then
+              echo 'normal apply error:'
+              cat "$RUNNER_TEMP/apply-normal.err"
+              echo 'recount apply error:'
+              cat "$RUNNER_TEMP/apply-recount.err"
+              PATCH="$patch" python3 - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+          import tempfile
+
+          patch = pathlib.Path(os.environ["PATCH"]).read_text(errors="surrogateescape")
+          lines = patch.splitlines(keepends=True)
+          starts = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
+          starts.append(len(lines))
+          print(f"diff sections: {len(starts) - 1}")
+          for n in range(len(starts) - 1):
+              section = "".join(lines[starts[n]:starts[n + 1]])
+              header = lines[starts[n]].rstrip("\n")
+              with tempfile.NamedTemporaryFile("w", delete=False, errors="surrogateescape") as f:
+                  f.write(section)
+                  name = f.name
+              result = subprocess.run(
+                  ["git", "apply", "--recount", "--check", name],
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              )
+              os.unlink(name)
+              state = "OK" if result.returncode == 0 else "FAIL"
+              print(f"section {n + 1:02d}: {state}: {header}")
+              if result.returncode != 0:
+                  print(result.stderr.rstrip())
+          PY
+              exit "$recount_status"
+            fi
+            recovery_mode=recount
+          else
+            printf 'not-needed\n' > "$RUNNER_TEMP/apply-recount.status"
+            : > "$RUNNER_TEMP/apply-recount.out"
+            : > "$RUNNER_TEMP/apply-recount.err"
+          fi
+          printf '%s\n' "$recovery_mode" | tee "$RUNNER_TEMP/recovery-mode.txt"
+
+          if [[ "$recovery_mode" == recount ]]; then
+            git apply --recount --index "$patch"
+          else
+            git apply --index "$patch"
+          fi
           git diff --cached --check
           git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/materialized-files.txt"
           test "$(wc -l < "$RUNNER_TEMP/materialized-files.txt")" -eq 29
@@ -78,6 +143,9 @@ jobs:
           git diff --cached --binary > "$RUNNER_TEMP/materialized-fallback.patch"
           sha256sum "$RUNNER_TEMP/materialized-fallback.patch" > \
             "$RUNNER_TEMP/materialized-fallback.sha256"
+          echo '--- materialized product diff ---'
+          git diff --cached -- tools/modprobe.c testsuite/test-modprobe.c
+          echo '--- end materialized product diff ---'
 
       - name: Set up build dependencies
         shell: bash
@@ -129,6 +197,13 @@ jobs:
              "$RUNNER_TEMP"/fallback-gzip.err \
              "$RUNNER_TEMP"/fallback-gzip.status \
              "$RUNNER_TEMP"/fallback-source-patch.sha256 \
+             "$RUNNER_TEMP"/apply-normal.out \
+             "$RUNNER_TEMP"/apply-normal.err \
+             "$RUNNER_TEMP"/apply-normal.status \
+             "$RUNNER_TEMP"/apply-recount.out \
+             "$RUNNER_TEMP"/apply-recount.err \
+             "$RUNNER_TEMP"/apply-recount.status \
+             "$RUNNER_TEMP"/recovery-mode.txt \
              "$RUNNER_TEMP"/materialized-files.txt \
              "$RUNNER_TEMP"/materialized-fallback.patch \
              "$RUNNER_TEMP"/materialized-fallback.sha256 \
