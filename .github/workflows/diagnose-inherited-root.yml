@@ -77,26 +77,18 @@ jobs:
           setup.write_text(text.replace(old, new))
 
           conf = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/config dir/provenance.conf')
-          text = conf.read_text()
-          assert text == 'install mod-loop-b $MODPROBE --show-depends custommodule\n'
+          assert conf.read_text() == 'install mod-loop-b $MODPROBE --show-depends custommodule\n'
           conf.write_text('install mod-loop-b $MODPROBE --show-depends mod-simple\n')
 
           correct = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/correct.txt')
           text = correct.read_text()
-          assert 'custommodule' in text
+          assert text.count('custommodule') == 1
           correct.write_text(text.replace('custommodule', 'mod-simple'))
 
           dep = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep')
           text = dep.read_text()
-          assert 'kernel/custommodule.ko:' in text
+          assert text.count('kernel/custommodule.ko:') == 1
           dep.write_text(text.replace('kernel/custommodule.ko:', 'kernel/mod-simple.ko:'))
-
-          test = Path('testsuite/test-modprobe.c')
-          text = test.read_text()
-          old = '''static int modprobe_exact_options_inherited_root(void)\n{\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
-          new = '''static int modprobe_exact_options_inherited_root(void)\n{\n\tint err;\n\n\terr = EXEC_TOOL(depmod, "-b", "/custom-root", "4.4.4");\n\tif (err != 0)\n\t\treturn err;\n\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
-          assert text.count(old) == 1
-          test.write_text(text.replace(old, new))
           PY
           clang-format -i testsuite/test-modprobe.c
 
@@ -111,13 +103,18 @@ jobs:
           meson setup --native-file build-dev.ini -Dmbedtls=disabled build-baseline
           meson compile -C build-baseline
           meson compile -C build-baseline testsuite/create-rootfs
+          root="$PWD/build-baseline/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
+          build-baseline/depmod -b "$root" 4.4.4
+          test -s "$root/lib/modules/4.4.4/modules.dep.bin"
+          cp "$root/lib/modules/4.4.4/modules.dep.bin" "$RUNNER_TEMP/provenance-modules.dep.bin"
+          base64 -w0 "$RUNNER_TEMP/provenance-modules.dep.bin" > "$RUNNER_TEMP/provenance-modules.dep.bin.b64"
+          sha256sum "$RUNNER_TEMP/provenance-modules.dep.bin" | tee "$RUNNER_TEMP/provenance-modules.dep.bin.sha256"
 
           set +e
           ( source scripts/sanitizer-env.sh; build-baseline/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/baseline.log"
           set -e
           grep -q 'FAILED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/baseline.log"
-          grep -q "Module dir not found" "$RUNNER_TEMP/baseline.log"
-          test -f build-baseline/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep.bin
+          grep -q 'Module dir not found' "$RUNNER_TEMP/baseline.log"
 
       - name: Run strict predecessor control
         shell: bash
@@ -129,10 +126,11 @@ jobs:
           meson setup --native-file build-dev.ini -Dmbedtls=disabled build-strict
           meson compile -C build-strict
           meson compile -C build-strict testsuite/create-rootfs
+          root="$PWD/build-strict/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
+          build-strict/depmod -b "$root" 4.4.4
 
           ( source scripts/sanitizer-env.sh; build-strict/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/strict.log"
           grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/strict.log"
-          test -f build-strict/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep.bin
 
       - name: Run fallback successor control
         shell: bash
@@ -150,9 +148,26 @@ jobs:
           clang-format -i tools/modprobe.c
           meson compile -C build-strict
           meson compile -C build-strict testsuite/create-rootfs
+          root="$PWD/build-strict/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
+          build-strict/depmod -b "$root" 4.4.4
 
           ( source scripts/sanitizer-env.sh; build-strict/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/fallback.log"
           grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/fallback.log"
+
+      - name: Upload corrected dep-index fixture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-dep-index-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/provenance-modules.dep.bin
+            ${{ runner.temp }}/provenance-modules.dep.bin.b64
+            ${{ runner.temp }}/provenance-modules.dep.bin.sha256
+            ${{ runner.temp }}/baseline.log
+            ${{ runner.temp }}/strict.log
+            ${{ runner.temp }}/fallback.log
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Restore carrier tree
         if: always()
