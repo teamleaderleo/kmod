@@ -1,12 +1,9 @@
 name: Materialize validated modprobe empty-options repair
 
 on:
-  push:
-    branches:
-      - fix/modprobe-empty-options-source-current
   pull_request:
     branches:
-      - master
+      - fieldwork/current-master-20260806
 
 permissions:
   contents: write
