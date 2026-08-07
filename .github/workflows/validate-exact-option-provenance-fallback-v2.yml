@@ -18,9 +18,9 @@ concurrency:
 
 jobs:
   diagnose-carrier:
-    name: fallback targeted byte repair search
+    name: fallback byte repair search
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out exact experiment branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -59,12 +59,25 @@ jobs:
           gz = bytearray(pathlib.Path(os.environ["GZIP"]).read_bytes())
           damaged = pathlib.Path(os.environ["PATCH"]).read_bytes()
           expected_crc, expected_size = struct.unpack("<II", gz[-8:])
-          marker = b"+    err == 0)"
-          target = damaged.find(marker)
-          if target < 0:
-              raise SystemExit("corrupt marker not found")
+
+          tools_header = b"diff --git a/tools/modprobe.c b/tools/modprobe.c\n"
+          tools_start = damaged.find(tools_header)
+          if tools_start < 0:
+              raise SystemExit("tools/modprobe.c section not found")
+          anchor = b"option_transport_clear(&selected);"
+          anchor_pos = damaged.find(anchor, tools_start)
+          if anchor_pos < 0:
+              raise SystemExit("last known-good option transport anchor not found")
+          line_end = damaged.find(b"\n", anchor_pos)
+          if line_end < 0:
+              raise SystemExit("anchor line has no newline")
+          target = line_end + 1
+
           print(f"gzip_bytes={len(gz)} expected_crc={expected_crc:08x} expected_size={expected_size}")
-          print(f"first_bad_output_offset={target}")
+          print(f"tools_section_offset={tools_start}")
+          print(f"last_good_anchor_offset={anchor_pos}")
+          print(f"first_suspect_output_offset={target}")
+          print("first_suspect_output_bytes=" + repr(damaged[target:target + 96]))
 
           d = zlib.decompressobj(wbits=31)
           total = 0
@@ -80,33 +93,47 @@ jobs:
               if mapped is None and before <= target < total:
                   mapped = offset
                   print(f"mapped_input_offset={mapped} output_range={before}:{total}")
+                  break
           if mapped is None:
-              raise SystemExit("could not map corrupt output offset")
+              raise SystemExit("could not map suspect output offset")
 
-          lo = max(10, mapped - 96)
-          hi = min(len(gz) - 8, mapped + 97)
-          print(f"search_window={lo}:{hi} bytes={hi - lo}")
-          found = []
-          attempts = 0
-          for offset in range(lo, hi):
-              original = gz[offset]
-              for value in range(256):
-                  if value == original:
-                      continue
-                  attempts += 1
-                  gz[offset] = value
-                  try:
-                      out = zlib.decompress(bytes(gz), wbits=31)
-                  except zlib.error:
-                      continue
-                  if len(out) != expected_size:
-                      continue
-                  if (binascii.crc32(out) & 0xffffffff) != expected_crc:
-                      continue
-                  found.append((offset, original, value, bytes(gz), out))
-              gz[offset] = original
+          def search(lo, hi, label):
+              found = []
+              attempts = 0
+              print(f"{label}.search_window={lo}:{hi} bytes={hi - lo}")
+              for offset in range(lo, hi):
+                  original = gz[offset]
+                  for value in range(256):
+                      if value == original:
+                          continue
+                      attempts += 1
+                      gz[offset] = value
+                      try:
+                          out = zlib.decompress(bytes(gz), wbits=31)
+                      except zlib.error:
+                          continue
+                      if len(out) != expected_size:
+                          continue
+                      if (binascii.crc32(out) & 0xffffffff) != expected_crc:
+                          continue
+                      found.append((offset, original, value, bytes(gz), out))
+                  gz[offset] = original
+              print(f"{label}.attempts={attempts} matches={len(found)}")
+              return found
 
-          print(f"attempts={attempts} matching_byte_repairs={len(found)}")
+          payload_lo = 10
+          payload_hi = len(gz) - 8
+          found = search(max(payload_lo, mapped - 128), min(payload_hi, mapped + 129), "near")
+          if not found:
+              found = search(max(payload_lo, mapped - 512), min(payload_hi, mapped + 513), "wide")
+          if not found:
+              found = search(payload_lo, payload_hi, "full")
+
+          unique = {}
+          for item in found:
+              unique[item[3]] = item
+          found = list(unique.values())
+          print(f"unique_matching_byte_repairs={len(found)}")
           for offset, original, value, repaired, out in found:
               print(f"repair offset={offset} old=0x{original:02x} new=0x{value:02x} xor=0x{original ^ value:02x}")
               print(f"repaired_gzip_sha256={hashlib.sha256(repaired).hexdigest()}")
@@ -119,11 +146,14 @@ jobs:
           pathlib.Path(os.environ["OUT_PATCH"]).write_bytes(out)
           PY
 
+          gzip --test "$RUNNER_TEMP/repaired.patch.gz"
           git apply --check "$RUNNER_TEMP/repaired.patch"
           test "$(grep -c '^diff --git ' "$RUNNER_TEMP/repaired.patch")" -eq 29
           git apply --numstat "$RUNNER_TEMP/repaired.patch" | tee "$RUNNER_TEMP/repaired.numstat"
+          cut -f3- "$RUNNER_TEMP/repaired.numstat" | LC_ALL=C sort > "$RUNNER_TEMP/repaired-files.txt"
+          test "$(wc -l < "$RUNNER_TEMP/repaired-files.txt")" -eq 29
+          echo '1439259c98f50a66778b71c6f7cc5ce442edbf484ad735316a49401ec747e435  '"$RUNNER_TEMP/repaired-files.txt" | sha256sum --check
           sha256sum "$RUNNER_TEMP/repaired.patch.gz" "$RUNNER_TEMP/repaired.patch" | tee "$RUNNER_TEMP/repaired.sha256"
-          gzip --test "$RUNNER_TEMP/repaired.patch.gz"
           git status --short | tee "$RUNNER_TEMP/status-after.txt"
           test ! -s "$RUNNER_TEMP/status-after.txt"
 
@@ -131,13 +161,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kmod-fallback-targeted-byte-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          name: kmod-fallback-byte-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/damaged-gzip.err
             ${{ runner.temp }}/damaged-gzip.status
             ${{ runner.temp }}/repaired.patch.gz
             ${{ runner.temp }}/repaired.patch
             ${{ runner.temp }}/repaired.numstat
+            ${{ runner.temp }}/repaired-files.txt
             ${{ runner.temp }}/repaired.sha256
             ${{ runner.temp }}/status-after.txt
           if-no-files-found: warn
