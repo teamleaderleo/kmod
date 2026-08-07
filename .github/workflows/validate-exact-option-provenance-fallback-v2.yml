@@ -1,0 +1,184 @@
+name: Characterize damaged provenance fallback carrier
+
+on:
+  push:
+    branches:
+      - experiment/modprobe-exact-option-provenance-fallback
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exact-option-provenance-fallback-carrier-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  characterize-carrier:
+    name: known damaged fallback carrier
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact experiment branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: experiment/modprobe-exact-option-provenance-fallback
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact base and carrier identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=5086df53090b2fe9fa1c31351c05a78a12a4ba71
+          test "$(git merge-base HEAD "$base")" = "$base"
+          test "$(git rev-parse "$base:tools/modprobe.c")" = \
+            413960cae0f39945a3f2d6509dc4a8c262ae2609
+          git diff --quiet "$base" -- . ':(exclude).github'
+          carrier=.github/modprobe-exact-option-provenance-fallback.patch.gz.b64
+          echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  '"$carrier" | sha256sum --check
+          git rev-parse HEAD > "$RUNNER_TEMP/carrier-head.txt"
+          git status --short | tee "$RUNNER_TEMP/status-before.txt"
+          test ! -s "$RUNNER_TEMP/status-before.txt"
+
+      - name: Require the pinned damaged-carrier signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          carrier=.github/modprobe-exact-option-provenance-fallback.patch.gz.b64
+          gzip_file="$RUNNER_TEMP/damaged.patch.gz"
+          patch="$RUNNER_TEMP/damaged.patch"
+          base64 --decode "$carrier" > "$gzip_file"
+
+          set +e
+          gzip --decompress --stdout "$gzip_file" > "$patch" \
+            2> "$RUNNER_TEMP/gzip.err"
+          gzip_status=$?
+          set -e
+          printf '%s\n' "$gzip_status" > "$RUNNER_TEMP/gzip.status"
+          test "$gzip_status" -ne 0
+          test -s "$patch"
+
+          GZIP="$gzip_file" PATCH="$patch" python3 - <<'PY' | tee "$RUNNER_TEMP/carrier-metrics.txt"
+          import binascii
+          import os
+          import pathlib
+          import struct
+
+          gz = pathlib.Path(os.environ["GZIP"]).read_bytes()
+          recovered = pathlib.Path(os.environ["PATCH"]).read_bytes()
+          trailer_crc, trailer_size = struct.unpack("<II", gz[-8:])
+          recovered_crc = binascii.crc32(recovered) & 0xffffffff
+
+          print(f"gzip_bytes={len(gz)}")
+          print(f"trailer_crc32={trailer_crc:08x}")
+          print(f"trailer_isize={trailer_size}")
+          print(f"recovered_bytes={len(recovered)}")
+          print(f"recovered_crc32={recovered_crc:08x}")
+
+          assert len(gz) == 6434
+          assert trailer_crc == 0x23BE8CFA
+          assert trailer_size == 36682
+          assert len(recovered) == 36704
+          assert recovered_crc == 0x50DC6748
+          PY
+
+          sha256sum "$gzip_file" "$patch" > "$RUNNER_TEMP/damaged.sha256"
+          test "$(grep -c '^diff --git ' "$patch")" -eq 29
+
+          set +e
+          git apply --check "$patch" > "$RUNNER_TEMP/apply.out" \
+            2> "$RUNNER_TEMP/apply.err"
+          apply_status=$?
+          git apply --recount --check "$patch" > "$RUNNER_TEMP/recount.out" \
+            2> "$RUNNER_TEMP/recount.err"
+          recount_status=$?
+          set -e
+          printf '%s\n' "$apply_status" > "$RUNNER_TEMP/apply.status"
+          printf '%s\n' "$recount_status" > "$RUNNER_TEMP/recount.status"
+          test "$apply_status" -ne 0
+          test "$recount_status" -ne 0
+
+      - name: Require 28 valid sections and one corrupt tools section
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH="$RUNNER_TEMP/damaged.patch" python3 - <<'PY' | tee "$RUNNER_TEMP/section-check.txt"
+          import os
+          import pathlib
+          import subprocess
+          import tempfile
+
+          text = pathlib.Path(os.environ["PATCH"]).read_text(errors="surrogateescape")
+          lines = text.splitlines(keepends=True)
+          starts = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
+          starts.append(len(lines))
+          sections = ["".join(lines[starts[n]:starts[n + 1]]) for n in range(len(starts) - 1)]
+          assert len(sections) == 29
+
+          statuses = []
+          for number, section in enumerate(sections, 1):
+              header = section.splitlines()[0]
+              with tempfile.NamedTemporaryFile("w", delete=False, errors="surrogateescape") as f:
+                  f.write(section)
+                  name = f.name
+              result = subprocess.run(
+                  ["git", "apply", "--recount", "--check", name],
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  text=True,
+              )
+              os.unlink(name)
+              statuses.append(result.returncode)
+              state = "OK" if result.returncode == 0 else "FAIL"
+              print(f"section {number:02d}: {state}: {header}")
+
+          assert statuses[:28] == [0] * 28
+          assert statuses[28] != 0
+          assert sections[28].startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c")
+          PY
+
+          cat > "$RUNNER_TEMP/recovery-summary.txt" <<'EOF'
+          Exact byte-level recovery attempts retained separately:
+          - run 31144903377: single-bit search, 0 matching repairs
+          - run 31145103754: arbitrary single-byte search, 0 matching repairs
+          - run 31145253016: single Base64-character search, 0 matching repairs
+          - run 31145342454: local arbitrary adjacent-two-byte search, 0 matching repairs
+          - run 31145625437: nearby two-independent-bit search, 0 matching repairs
+          Product-source build/test is intentionally blocked on this branch because the carrier is corrupt.
+          EOF
+
+      - name: Verify clean tree
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short | tee "$RUNNER_TEMP/status-after.txt"
+          test ! -s "$RUNNER_TEMP/status-after.txt"
+
+      - name: Upload carrier characterization receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmod-fallback-damaged-carrier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/carrier-head.txt
+            ${{ runner.temp }}/status-before.txt
+            ${{ runner.temp }}/status-after.txt
+            ${{ runner.temp }}/gzip.err
+            ${{ runner.temp }}/gzip.status
+            ${{ runner.temp }}/carrier-metrics.txt
+            ${{ runner.temp }}/damaged.sha256
+            ${{ runner.temp }}/apply.out
+            ${{ runner.temp }}/apply.err
+            ${{ runner.temp }}/apply.status
+            ${{ runner.temp }}/recount.out
+            ${{ runner.temp }}/recount.err
+            ${{ runner.temp }}/recount.status
+            ${{ runner.temp }}/section-check.txt
+            ${{ runner.temp }}/recovery-summary.txt
+          if-no-files-found: warn
+          retention-days: 30
