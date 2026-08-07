@@ -52,6 +52,20 @@ jobs:
           test ! -s "$RUNNER_TEMP/status-before.txt"
           git rev-parse HEAD > "$RUNNER_TEMP/carrier-head.txt"
 
+      - name: Recover clean strict-provenance reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          strict_b64="$RUNNER_TEMP/strict.patch.gz.b64"
+          strict_gz="$RUNNER_TEMP/strict.patch.gz"
+          strict_patch="$RUNNER_TEMP/strict.patch"
+          git show origin/experiment/modprobe-exact-option-provenance:.github/modprobe-exact-option-provenance.patch.gz.b64 > "$strict_b64"
+          base64 --decode "$strict_b64" > "$strict_gz"
+          echo 'ae01646901a5bc8305a4869446344022e21be420414ab6074fa1e2a7a5be75bd  '"$strict_gz" | sha256sum --check
+          gzip --decompress --stdout "$strict_gz" > "$strict_patch"
+          echo 'caed53a3a7f5dc57f2d4114da21a623dfd9ea1343881bdced3617adf30ecee32  '"$strict_patch" | sha256sum --check
+          git apply --check "$strict_patch"
+
       - name: Recover and apply fallback payload
         shell: bash
         run: |
@@ -92,13 +106,14 @@ jobs:
               cat "$RUNNER_TEMP/apply-normal.err"
               echo 'recount apply error:'
               cat "$RUNNER_TEMP/apply-recount.err"
-              PATCH="$patch" python3 - <<'PY'
+              PATCH="$patch" STRICT_PATCH="$RUNNER_TEMP/strict.patch" python3 - <<'PY'
           import os
           import pathlib
           import subprocess
           import tempfile
 
           patch = pathlib.Path(os.environ["PATCH"]).read_text(errors="surrogateescape")
+          strict_patch = pathlib.Path(os.environ["STRICT_PATCH"]).read_text(errors="surrogateescape")
           lines = patch.splitlines(keepends=True)
           starts = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
           starts.append(len(lines))
@@ -133,6 +148,30 @@ jobs:
                       for i in range(lo, hi):
                           print(f"{i + 1:04d}: {section_lines[i]}")
                       print("--- end corrupt-line neighborhood ---")
+
+          strict_lines = strict_patch.splitlines(keepends=True)
+          strict_starts = [i for i, line in enumerate(strict_lines) if line.startswith("diff --git ")]
+          strict_starts.append(len(strict_lines))
+          strict_tools = ""
+          for n in range(len(strict_starts) - 1):
+              section = "".join(strict_lines[strict_starts[n]:strict_starts[n + 1]])
+              if section.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"):
+                  strict_tools = section
+                  break
+          if strict_tools:
+              strict_tool_lines = strict_tools.splitlines()
+              anchors = [
+                  i for i, line in enumerate(strict_tool_lines)
+                  if "option_transport_clear(&selected);" in line
+              ]
+              print(f"strict reference anchors: {anchors}")
+              for anchor in anchors:
+                  print("--- strict-reference neighborhood ---")
+                  lo = max(0, anchor - 20)
+                  hi = min(len(strict_tool_lines), anchor + 81)
+                  for i in range(lo, hi):
+                      print(f"S{i + 1:04d}: {strict_tool_lines[i]}")
+                  print("--- end strict-reference neighborhood ---")
           PY
               exit "$recount_status"
             fi
