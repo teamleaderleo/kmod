@@ -3,6 +3,8 @@ name: Diagnose inherited modprobe root
 on:
   push:
     branches: [experiment/modprobe-exact-option-provenance-fallback-reconstructed]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -23,7 +25,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Recover attributable fixtures and strict tools section
+      - name: Recover attributable inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -39,18 +41,20 @@ jobs:
           git show origin/experiment/modprobe-exact-option-provenance-fallback:.github/modprobe-exact-option-provenance-fallback.patch.gz.b64 | base64 -d > "$RUNNER_TEMP/fallback.gz"
           set +e
           gzip -dc "$RUNNER_TEMP/fallback.gz" > "$RUNNER_TEMP/fallback.damaged.patch" 2> "$RUNNER_TEMP/fallback-gzip.err"
-          status=$?
+          damaged=$?
           set -e
-          test "$status" -ne 0
+          test "$damaged" -ne 0
 
           PATCH="$RUNNER_TEMP/fallback.damaged.patch" STRICT="$RUNNER_TEMP/strict.patch" FIXTURES="$RUNNER_TEMP/fixtures.patch" TOOLS="$RUNNER_TEMP/strict-tools.patch" python3 - <<'PY'
           import os
           from pathlib import Path
+
           def sections(text):
               lines = text.splitlines(keepends=True)
               starts = [i for i, line in enumerate(lines) if line.startswith('diff --git ')]
               starts.append(len(lines))
               return [''.join(lines[starts[i]:starts[i + 1]]) for i in range(len(starts) - 1)]
+
           fallback = sections(Path(os.environ['PATCH']).read_text(errors='surrogateescape'))
           strict = sections(Path(os.environ['STRICT']).read_text(errors='surrogateescape'))
           assert len(fallback) == 29
@@ -61,13 +65,12 @@ jobs:
 
           git apply --check "$RUNNER_TEMP/fixtures.patch"
           git apply "$RUNNER_TEMP/fixtures.patch"
-          cp testsuite/test-modprobe.c "$RUNNER_TEMP/test-modprobe.fixture.c"
 
       - name: Set up build dependencies
         shell: bash
         run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
 
-      - name: Baseline reversing control
+      - name: Run exact baseline control
         shell: bash
         run: |
           set -euo pipefail
@@ -75,60 +78,39 @@ jobs:
           meson compile -C build-baseline
           meson compile -C build-baseline testsuite/create-rootfs
 
-          root=build-baseline/testsuite/rootfs/test-modprobe/exact-options-provenance
-          echo '--- custom root inventory ---'
-          find "$root/custom-root/lib/modules/4.4.4" -maxdepth 3 -type f -printf '%P %s bytes\n' | LC_ALL=C sort
-          echo '--- modules.dep ---'
-          cat "$root/custom-root/lib/modules/4.4.4/modules.dep"
+          root=build-baseline/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4
+          echo '--- baseline custom-root inventory ---'
+          find "$root" -maxdepth 3 -type f -printf '%P %s bytes\n' | LC_ALL=C sort
+          echo '--- baseline modules.dep ---'
+          cat "$root/modules.dep"
 
           set +e
-          ( source scripts/sanitizer-env.sh; build-baseline/testsuite/test-modprobe modprobe_exact_options_inherited_root ) > "$RUNNER_TEMP/baseline-spaced.log" 2>&1
-          spaced=$?
+          ( source scripts/sanitizer-env.sh; build-baseline/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/baseline.log"
+          status=${PIPESTATUS[0]}
           set -e
-          printf 'baseline_spaced_status=%s\n' "$spaced"
-          cat "$RUNNER_TEMP/baseline-spaced.log"
+          printf 'baseline_status=%s\n' "$status"
 
-          cp -a "$root/config dir" "$root/configdir"
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('testsuite/test-modprobe.c')
-          text = p.read_text()
-          old = 'return EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");'
-          assert text.count(old) >= 1
-          pos = text.index('static int modprobe_exact_options_inherited_root(void)')
-          end = text.index('DEFINE_TEST(modprobe_exact_options_inherited_root,', pos)
-          block = text[pos:end]
-          assert block.count(old) == 1
-          block = block.replace(old, 'return EXEC_TOOL(modprobe, "-C", "/configdir", "mod-loop-b");')
-          p.write_text(text[:pos] + block + text[end:])
-          PY
-          meson compile -C build-baseline test-modprobe
-          set +e
-          ( source scripts/sanitizer-env.sh; build-baseline/testsuite/test-modprobe modprobe_exact_options_inherited_root ) > "$RUNNER_TEMP/baseline-nospace.log" 2>&1
-          nospace=$?
-          set -e
-          printf 'baseline_nospace_status=%s\n' "$nospace"
-          cat "$RUNNER_TEMP/baseline-nospace.log"
-          cp "$RUNNER_TEMP/test-modprobe.fixture.c" testsuite/test-modprobe.c
-
-      - name: Strict predecessor and fallback comparison
+      - name: Run strict predecessor control
         shell: bash
         run: |
           set -euo pipefail
           git apply --check "$RUNNER_TEMP/strict-tools.patch"
           git apply "$RUNNER_TEMP/strict-tools.patch"
           clang-format -i tools/modprobe.c
-
           meson setup --native-file build-dev.ini -Dmbedtls=disabled build-candidate
           meson compile -C build-candidate
           meson compile -C build-candidate testsuite/create-rootfs
-          set +e
-          ( source scripts/sanitizer-env.sh; build-candidate/testsuite/test-modprobe modprobe_exact_options_inherited_root ) > "$RUNNER_TEMP/strict.log" 2>&1
-          strict_status=$?
-          set -e
-          printf 'strict_status=%s\n' "$strict_status"
-          cat "$RUNNER_TEMP/strict.log"
 
+          set +e
+          ( source scripts/sanitizer-env.sh; build-candidate/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/strict.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf 'strict_status=%s\n' "$status"
+
+      - name: Run fallback successor control
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           p = Path('tools/modprobe.c')
@@ -140,18 +122,12 @@ jobs:
           PY
           clang-format -i tools/modprobe.c
           meson compile -C build-candidate
-          set +e
-          ( source scripts/sanitizer-env.sh; build-candidate/testsuite/test-modprobe modprobe_exact_options_inherited_root ) > "$RUNNER_TEMP/fallback.log" 2>&1
-          fallback_status=$?
-          set -e
-          printf 'fallback_status=%s\n' "$fallback_status"
-          cat "$RUNNER_TEMP/fallback.log"
 
-          printf '%s\n' \
-            "baseline_spaced=$spaced" \
-            "baseline_nospace=$nospace" \
-            "strict=$strict_status" \
-            "fallback=$fallback_status" 2>/dev/null || true
+          set +e
+          ( source scripts/sanitizer-env.sh; build-candidate/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/fallback.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf 'fallback_status=%s\n' "$status"
 
       - name: Restore carrier tree
         if: always()
