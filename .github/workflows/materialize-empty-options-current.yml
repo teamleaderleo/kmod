@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - master
+      - upstream-master-2026-08-06
   workflow_dispatch:
 
 permissions:
