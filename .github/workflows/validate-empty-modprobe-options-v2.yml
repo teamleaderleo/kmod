@@ -48,7 +48,7 @@ jobs:
             413960cae0f39945a3f2d6509dc4a8c262ae2609
           git diff --quiet "$base" -- . ':(exclude).github'
           test "$(git hash-object .github/modprobe-empty-options-environment.patch)" = \
-            2f57e3a8c2ed1a37f4519de0a8928872891bb78c
+            abaa53cf60a9705dbe5f4c202095efde572a03f6
           sha256sum .github/modprobe-empty-options-environment.patch | \
             tee "$RUNNER_TEMP/carrier-patch.sha256"
           git status --short | tee "$RUNNER_TEMP/status-before.txt"
