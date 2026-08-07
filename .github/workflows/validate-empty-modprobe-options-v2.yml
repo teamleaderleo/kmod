@@ -47,7 +47,10 @@ jobs:
           test "$(git rev-parse "$base:tools/modprobe.c")" = \
             413960cae0f39945a3f2d6509dc4a8c262ae2609
           git diff --quiet "$base" -- . ':(exclude).github'
-          echo '27048a0feb47fc3ea70c8d905ebb5e97e76a30bd7b59e72039a7260c93ba3bf6  .github/modprobe-empty-options-environment.patch' | sha256sum --check
+          test "$(git hash-object .github/modprobe-empty-options-environment.patch)" = \
+            46ca2e1d0437fca1aaf393187e94a7b323c2db9d
+          sha256sum .github/modprobe-empty-options-environment.patch | \
+            tee "$RUNNER_TEMP/carrier-patch.sha256"
           git status --short | tee "$RUNNER_TEMP/status-before.txt"
           test ! -s "$RUNNER_TEMP/status-before.txt"
           git rev-parse HEAD > "$RUNNER_TEMP/carrier-head.txt"
@@ -135,6 +138,7 @@ jobs:
           out="$RUNNER_TEMP/empty-env-v2-${{ matrix.compiler }}"
           mkdir -p "$out"
           cp "$RUNNER_TEMP"/carrier-head.txt \
+             "$RUNNER_TEMP"/carrier-patch.sha256 \
              "$RUNNER_TEMP"/status-before.txt \
              "$RUNNER_TEMP"/baseline-${{ matrix.compiler }}.out \
              "$RUNNER_TEMP"/baseline-${{ matrix.compiler }}.err \
