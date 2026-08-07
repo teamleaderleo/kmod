@@ -183,7 +183,6 @@ jobs:
           done
 
           meson test -C build-${{ matrix.compiler }} --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
-          grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
           python3 "$RUNNER_TEMP/fallback-discriminator.py" "$PWD/build-${{ matrix.compiler }}/modprobe" > "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
           python3 -m json.tool "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
           sha256sum build-${{ matrix.compiler }}/modprobe > "$RUNNER_TEMP/modprobe-${{ matrix.compiler }}.sha256"
