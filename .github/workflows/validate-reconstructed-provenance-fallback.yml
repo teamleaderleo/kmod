@@ -3,13 +3,15 @@ name: Validate reconstructed provenance fallback
 on:
   push:
     branches: [experiment/modprobe-exact-option-provenance-fallback-reconstructed]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: reconstructed-provenance-fallback-${{ github.ref }}
+  group: reconstructed-provenance-fallback-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
