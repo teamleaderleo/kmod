@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   diagnose-carrier:
-    name: fallback Base64 repair search
+    name: fallback two-byte repair search
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify source and search Base64 substitutions
+      - name: Verify source and search local two-byte substitutions
         shell: bash
         run: |
           set -euo pipefail
@@ -40,9 +40,9 @@ jobs:
           git diff --quiet "$base" -- . ':(exclude).github'
           carrier=.github/modprobe-exact-option-provenance-fallback.patch.gz.b64
           echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  '"$carrier" | sha256sum --check
+          base64 --decode "$carrier" > "$RUNNER_TEMP/damaged.patch.gz"
 
-          CARRIER="$carrier" OUT_GZIP="$RUNNER_TEMP/repaired.patch.gz" OUT_PATCH="$RUNNER_TEMP/repaired.patch" python3 - <<'PY'
-          import base64
+          GZIP="$RUNNER_TEMP/damaged.patch.gz" OUT_GZIP="$RUNNER_TEMP/repaired.patch.gz" OUT_PATCH="$RUNNER_TEMP/repaired.patch" python3 - <<'PY'
           import binascii
           import hashlib
           import os
@@ -50,63 +50,57 @@ jobs:
           import struct
           import zlib
 
-          alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-          raw = pathlib.Path(os.environ["CARRIER"]).read_bytes()
-          compact = bytearray(b"".join(raw.split()))
-          damaged_gz = base64.b64decode(compact, validate=True)
-          expected_crc, expected_size = struct.unpack("<II", damaged_gz[-8:])
-          print(f"base64_chars={len(compact)} gzip_bytes={len(damaged_gz)} expected_crc={expected_crc:08x} expected_size={expected_size}")
+          gz = bytearray(pathlib.Path(os.environ["GZIP"]).read_bytes())
+          expected_crc, expected_size = struct.unpack("<II", gz[-8:])
+          mapped = 5354
+          payload_lo = 10
+          payload_hi = len(gz) - 8
+          start_lo = max(payload_lo, mapped - 32)
+          start_hi = min(payload_hi - 1, mapped + 33)
+          print(f"gzip_bytes={len(gz)} expected_crc={expected_crc:08x} expected_size={expected_size}")
+          print(f"pair_start_window={start_lo}:{start_hi} starts={start_hi - start_lo}")
 
-          mapped_gzip_offset = 5354
-          mapped_b64 = (mapped_gzip_offset // 3) * 4
-          print(f"mapped_base64_index={mapped_b64}")
-
-          def search(indices, label):
-              found = []
-              attempts = 0
-              for idx in indices:
-                  original = compact[idx]
-                  if original == ord('='):
+          found = []
+          attempts = 0
+          for start in range(start_lo, start_hi):
+              old0, old1 = gz[start], gz[start + 1]
+              for pair in range(65536):
+                  new0 = pair >> 8
+                  new1 = pair & 0xff
+                  if new0 == old0 and new1 == old1:
                       continue
-                  for value in alphabet:
-                      if value == original:
-                          continue
-                      attempts += 1
-                      compact[idx] = value
-                      try:
-                          gz = base64.b64decode(compact, validate=True)
-                          out = zlib.decompress(gz, wbits=31)
-                      except (binascii.Error, zlib.error):
-                          continue
-                      if len(out) != expected_size:
-                          continue
-                      if (binascii.crc32(out) & 0xffffffff) != expected_crc:
-                          continue
-                      found.append((idx, original, value, gz, out))
-                  compact[idx] = original
-              print(f"{label}.attempts={attempts} matches={len(found)}")
-              return found
+                  attempts += 1
+                  gz[start] = new0
+                  gz[start + 1] = new1
+                  try:
+                      out = zlib.decompress(bytes(gz), wbits=31)
+                  except zlib.error:
+                      continue
+                  if len(out) != expected_size:
+                      continue
+                  if (binascii.crc32(out) & 0xffffffff) != expected_crc:
+                      continue
+                  found.append((start, old0, old1, new0, new1, bytes(gz), out))
+              gz[start] = old0
+              gz[start + 1] = old1
+              if found:
+                  break
 
-          lo = max(0, mapped_b64 - 256)
-          hi = min(len(compact), mapped_b64 + 257)
-          found = search(range(lo, hi), "near")
-          if not found:
-              found = search(range(len(compact)), "full")
-
+          print(f"attempts={attempts} matches={len(found)}")
           unique = {}
           for item in found:
-              unique[item[3]] = item
+              unique[item[5]] = item
           found = list(unique.values())
-          print(f"unique_matching_base64_repairs={len(found)}")
-          for idx, original, value, gz, out in found:
-              print(f"repair base64_index={idx} old={chr(original)!r} new={chr(value)!r}")
-              print(f"repaired_gzip_sha256={hashlib.sha256(gz).hexdigest()}")
+          print(f"unique_matching_two_byte_repairs={len(found)}")
+          for start, old0, old1, new0, new1, repaired, out in found:
+              print(f"repair start={start} old={old0:02x}{old1:02x} new={new0:02x}{new1:02x}")
+              print(f"repaired_gzip_sha256={hashlib.sha256(repaired).hexdigest()}")
               print(f"repaired_patch_sha256={hashlib.sha256(out).hexdigest()}")
           if len(found) != 1:
               raise SystemExit(2)
 
-          _, _, _, gz, out = found[0]
-          pathlib.Path(os.environ["OUT_GZIP"]).write_bytes(gz)
+          _, _, _, _, _, repaired, out = found[0]
+          pathlib.Path(os.environ["OUT_GZIP"]).write_bytes(repaired)
           pathlib.Path(os.environ["OUT_PATCH"]).write_bytes(out)
           PY
 
@@ -125,7 +119,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kmod-fallback-base64-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          name: kmod-fallback-two-byte-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/repaired.patch.gz
             ${{ runner.temp }}/repaired.patch
