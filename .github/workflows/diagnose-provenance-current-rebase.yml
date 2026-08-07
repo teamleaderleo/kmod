@@ -3,6 +3,8 @@ name: Diagnose provenance fallback current rebase
 on:
   push:
     branches: [experiment/modprobe-provenance-fallback-current-master]
+  pull_request:
+    branches: [internal/provenance-fallback-current-base]
   workflow_dispatch:
 
 permissions:
@@ -24,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           base=dae6c02ffed2e8d16da8dba16d974fc955eebb1f
-          test "$(git rev-parse HEAD^)" = "$base"
+          test "$(git merge-base HEAD "$base")" = "$base"
           test "$(git rev-parse "$base:tools/modprobe.c")" = c4b5021137a01529d75d9979e262308ce371bbae
           git diff --quiet "$base" -- . ':(exclude).github'
 
