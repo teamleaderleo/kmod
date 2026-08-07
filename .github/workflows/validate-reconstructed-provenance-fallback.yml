@@ -116,7 +116,13 @@ jobs:
           clang-format -i tools/modprobe.c
           git add tools/modprobe.c
           git diff --cached --check
-          clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
+          clang-format --dry-run --Werror tools/modprobe.c
+          set +e
+          clang-format --dry-run --Werror testsuite/test-modprobe.c
+          test_format_status=$?
+          set -e
+          printf '%s\n' "$test_format_status" | tee "$RUNNER_TEMP/inherited-test-format.status"
+          test "$test_format_status" -ne 0
           git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/files.txt"
           echo '6aa489e232b40998dc955ff205e16c4d65b6472b956cc395e2d212b45ab5608a  '"$RUNNER_TEMP/files.txt" | sha256sum --check
           git diff --cached --binary > "$RUNNER_TEMP/reconstructed.patch"
@@ -166,7 +172,7 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/reconstructed-${{ matrix.compiler }}"
           mkdir -p "$out"
-          cp "$RUNNER_TEMP"/reconstruction-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/files-before-policy.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/reconstructed.patch "$RUNNER_TEMP"/reconstructed.sha256 "$RUNNER_TEMP"/oracle.txt "$RUNNER_TEMP"/tools.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
+          cp "$RUNNER_TEMP"/reconstruction-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/files-before-policy.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/inherited-test-format.status "$RUNNER_TEMP"/reconstructed.patch "$RUNNER_TEMP"/reconstructed.sha256 "$RUNNER_TEMP"/oracle.txt "$RUNNER_TEMP"/tools.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
           git reset --hard HEAD
           git clean -fdx
           git status --short | tee "$RUNNER_TEMP/status-after.txt"
