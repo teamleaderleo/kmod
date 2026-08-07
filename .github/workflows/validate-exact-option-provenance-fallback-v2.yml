@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   diagnose-carrier:
-    name: fallback two-byte repair search
+    name: fallback two-bit repair search
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify source and search local two-byte substitutions
+      - name: Verify source and search nearby two-bit flips
         shell: bash
         run: |
           set -euo pipefail
@@ -42,7 +42,11 @@ jobs:
           echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  '"$carrier" | sha256sum --check
           base64 --decode "$carrier" > "$RUNNER_TEMP/damaged.patch.gz"
 
-          GZIP="$RUNNER_TEMP/damaged.patch.gz" OUT_GZIP="$RUNNER_TEMP/repaired.patch.gz" OUT_PATCH="$RUNNER_TEMP/repaired.patch" python3 - <<'PY'
+          set +e
+          GZIP="$RUNNER_TEMP/damaged.patch.gz" \
+          OUT_GZIP="$RUNNER_TEMP/repaired.patch.gz" \
+          OUT_PATCH="$RUNNER_TEMP/repaired.patch" \
+          python3 - <<'PY' 2>&1 | tee "$RUNNER_TEMP/two-bit-search.log"
           import binascii
           import hashlib
           import os
@@ -55,54 +59,56 @@ jobs:
           mapped = 5354
           payload_lo = 10
           payload_hi = len(gz) - 8
-          start_lo = max(payload_lo, mapped - 32)
-          start_hi = min(payload_hi - 1, mapped + 33)
+          byte_lo = max(payload_lo, mapped - 64)
+          byte_hi = min(payload_hi, mapped + 65)
+          positions = [(offset, bit) for offset in range(byte_lo, byte_hi) for bit in range(8)]
           print(f"gzip_bytes={len(gz)} expected_crc={expected_crc:08x} expected_size={expected_size}")
-          print(f"pair_start_window={start_lo}:{start_hi} starts={start_hi - start_lo}")
+          print(f"byte_window={byte_lo}:{byte_hi} bytes={byte_hi - byte_lo} bit_positions={len(positions)}")
 
           found = []
           attempts = 0
-          for start in range(start_lo, start_hi):
-              old0, old1 = gz[start], gz[start + 1]
-              for pair in range(65536):
-                  new0 = pair >> 8
-                  new1 = pair & 0xff
-                  if new0 == old0 and new1 == old1:
+          for first in range(len(positions)):
+              off1, bit1 = positions[first]
+              mask1 = 1 << bit1
+              gz[off1] ^= mask1
+              for second in range(first + 1, len(positions)):
+                  off2, bit2 = positions[second]
+                  if off2 == off1:
                       continue
                   attempts += 1
-                  gz[start] = new0
-                  gz[start + 1] = new1
+                  mask2 = 1 << bit2
+                  gz[off2] ^= mask2
                   try:
                       out = zlib.decompress(bytes(gz), wbits=31)
                   except zlib.error:
-                      continue
-                  if len(out) != expected_size:
-                      continue
-                  if (binascii.crc32(out) & 0xffffffff) != expected_crc:
-                      continue
-                  found.append((start, old0, old1, new0, new1, bytes(gz), out))
-              gz[start] = old0
-              gz[start + 1] = old1
-              if found:
-                  break
+                      out = None
+                  if out is not None and len(out) == expected_size and \
+                     (binascii.crc32(out) & 0xffffffff) == expected_crc:
+                      found.append((off1, bit1, off2, bit2, bytes(gz), out))
+                  gz[off2] ^= mask2
+              gz[off1] ^= mask1
 
           print(f"attempts={attempts} matches={len(found)}")
           unique = {}
           for item in found:
-              unique[item[5]] = item
+              unique[item[4]] = item
           found = list(unique.values())
-          print(f"unique_matching_two_byte_repairs={len(found)}")
-          for start, old0, old1, new0, new1, repaired, out in found:
-              print(f"repair start={start} old={old0:02x}{old1:02x} new={new0:02x}{new1:02x}")
+          print(f"unique_matching_two_bit_repairs={len(found)}")
+          for off1, bit1, off2, bit2, repaired, out in found:
+              print(f"repair byte1={off1} bit1={bit1} byte2={off2} bit2={bit2}")
               print(f"repaired_gzip_sha256={hashlib.sha256(repaired).hexdigest()}")
               print(f"repaired_patch_sha256={hashlib.sha256(out).hexdigest()}")
           if len(found) != 1:
               raise SystemExit(2)
 
-          _, _, _, _, _, repaired, out = found[0]
+          _, _, _, _, repaired, out = found[0]
           pathlib.Path(os.environ["OUT_GZIP"]).write_bytes(repaired)
           pathlib.Path(os.environ["OUT_PATCH"]).write_bytes(out)
           PY
+          search_status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$search_status" > "$RUNNER_TEMP/two-bit-search.status"
+          test "$search_status" -eq 0
 
           gzip --test "$RUNNER_TEMP/repaired.patch.gz"
           git apply --check "$RUNNER_TEMP/repaired.patch"
@@ -112,6 +118,12 @@ jobs:
           test "$(wc -l < "$RUNNER_TEMP/repaired-files.txt")" -eq 29
           echo '1439259c98f50a66778b71c6f7cc5ce442edbf484ad735316a49401ec747e435  '"$RUNNER_TEMP/repaired-files.txt" | sha256sum --check
           sha256sum "$RUNNER_TEMP/repaired.patch.gz" "$RUNNER_TEMP/repaired.patch" | tee "$RUNNER_TEMP/repaired.sha256"
+
+      - name: Verify cleanup state
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
           git status --short | tee "$RUNNER_TEMP/status-after.txt"
           test ! -s "$RUNNER_TEMP/status-after.txt"
 
@@ -119,8 +131,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kmod-fallback-two-byte-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          name: kmod-fallback-two-bit-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/two-bit-search.log
+            ${{ runner.temp }}/two-bit-search.status
             ${{ runner.temp }}/repaired.patch.gz
             ${{ runner.temp }}/repaired.patch
             ${{ runner.temp }}/repaired.numstat
