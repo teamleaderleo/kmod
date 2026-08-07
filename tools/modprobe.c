@@ -699,29 +699,304 @@ static int insmod_all(struct kmod_ctx *ctx, char **args, int nargs)
 	return err;
 }
 
-static void env_modprobe_options_append(const char *value)
+#define MODPROBE_OPTIONS_EXACT_ENV "KMOD_MODPROBE_OPTIONS_EXACT"
+#define MODPROBE_OPTIONS_BASE_LEN_ENV "KMOD_MODPROBE_OPTIONS_BASE_LEN"
+#define MODPROBE_OPTIONS_EXACT_PREFIX "KMOD1;"
+#define MODPROBE_OPTIONS_EXACT_PREFIX_LEN 6
+#define MODPROBE_OPTIONS_OLD_CHILD_FAILURE "--kmod-exact-options-required"
+
+struct option_transport {
+	char **args;
+	size_t count;
+};
+
+static void option_transport_clear(struct option_transport *transport)
 {
-	const char *old = getenv("MODPROBE_OPTIONS");
-	char *env;
+	size_t i;
 
-	if (old == NULL) {
-		setenv("MODPROBE_OPTIONS", value, 1);
-		return;
-	}
-
-	if (asprintf(&env, "%s %s", old, value) < 0) {
-		ERR("could not append value to $MODPROBE_OPTIONS\n");
-		return;
-	}
-
-	if (setenv("MODPROBE_OPTIONS", env, 1) < 0)
-		ERR("could not setenv(MODPROBE_OPTIONS, \"%s\")\n", env);
-	free(env);
+	for (i = 0; i < transport->count; i++)
+		free(transport->args[i]);
+	free(transport->args);
+	transport->args = NULL;
+	transport->count = 0;
 }
 
-static char **prepend_options_from_env(int *p_argc, char **orig_argv)
+static int option_transport_append(struct option_transport *transport, const char *value)
 {
-	const char *p, *env = getenv("MODPROBE_OPTIONS");
+	char **args;
+	size_t count, bytes;
+
+	if (uaddsz_overflow(transport->count, 1, &count) ||
+	    umulsz_overflow(count, sizeof(*args), &bytes))
+		return -EOVERFLOW;
+
+	args = realloc(transport->args, bytes);
+	if (args == NULL)
+		return -ENOMEM;
+	transport->args = args;
+	transport->args[transport->count] = strdup(value);
+	if (transport->args[transport->count] == NULL)
+		return -ENOMEM;
+	transport->count = count;
+	return 0;
+}
+
+static int option_transport_append_all(struct option_transport *dst,
+				       const struct option_transport *src, size_t start)
+{
+	size_t i;
+	int err;
+
+	for (i = start; i < src->count; i++) {
+		err = option_transport_append(dst, src->args[i]);
+		if (err < 0)
+			return err;
+	}
+	return 0;
+}
+
+static size_t option_transport_decimal_len(size_t value)
+{
+	size_t len = 1;
+
+	while (value >= 10) {
+		value /= 10;
+		len++;
+	}
+	return len;
+}
+
+static int option_transport_encode_exact(const struct option_transport *transport,
+					 char **record_out)
+{
+	char *record, *p;
+	size_t i, len = MODPROBE_OPTIONS_EXACT_PREFIX_LEN;
+
+	for (i = 0; i < transport->count; i++) {
+		size_t value_len = strlen(transport->args[i]);
+		size_t part;
+
+		if (uaddsz_overflow(option_transport_decimal_len(value_len), 2, &part) ||
+		    uaddsz_overflow(part, value_len, &part) ||
+		    uaddsz_overflow(len, part, &len))
+			return -EOVERFLOW;
+	}
+	if (uaddsz_overflow(len, 1, &len))
+		return -EOVERFLOW;
+
+	record = malloc(len);
+	if (record == NULL)
+		return -ENOMEM;
+	p = stpcpy(record, MODPROBE_OPTIONS_EXACT_PREFIX);
+	for (i = 0; i < transport->count; i++) {
+		size_t value_len = strlen(transport->args[i]);
+		int written = sprintf(p, "%zu", value_len);
+
+		p += written;
+		*p++ = ':';
+		memcpy(p, transport->args[i], value_len);
+		p += value_len;
+		*p++ = ',';
+	}
+	*p = '\0';
+	*record_out = record;
+	return 0;
+}
+
+static int option_transport_encode_legacy(const struct option_transport *transport,
+					  char **legacy_out)
+{
+	char *legacy, *p;
+	size_t i, len = 1;
+
+	for (i = 0; i < transport->count; i++) {
+		const char *value = transport->args[i];
+		size_t value_len = strlen(value), part = value_len;
+
+		if (i > 0 && uaddsz_overflow(len, 1, &len))
+			return -EOVERFLOW;
+		if (value_len == 0) {
+			part = 2;
+		} else if (strchr(value, ' ') != NULL || strchr(value, '\'') != NULL ||
+			   strchr(value, '"') != NULL) {
+			if (strchr(value, '\'') == NULL || strchr(value, '"') == NULL) {
+				if (uaddsz_overflow(part, 2, &part))
+					return -EOVERFLOW;
+			} else {
+				return -ENOTSUP;
+			}
+		}
+		if (uaddsz_overflow(len, part, &len))
+			return -EOVERFLOW;
+	}
+
+	legacy = malloc(len);
+	if (legacy == NULL)
+		return -ENOMEM;
+	p = legacy;
+	for (i = 0; i < transport->count; i++) {
+		const char *value = transport->args[i];
+		size_t value_len = strlen(value);
+		char quote = '\0';
+
+		if (i > 0)
+			*p++ = ' ';
+		if (value_len == 0) {
+			*p++ = '\'';
+			*p++ = '\'';
+			continue;
+		}
+		if (strchr(value, ' ') != NULL || strchr(value, '\'') != NULL ||
+		    strchr(value, '"') != NULL)
+			quote = strchr(value, '\'') == NULL ? '\'' : '"';
+		if (quote != '\0')
+			*p++ = quote;
+		memcpy(p, value, value_len);
+		p += value_len;
+		if (quote != '\0')
+			*p++ = quote;
+	}
+	*p = '\0';
+	*legacy_out = legacy;
+	return 0;
+}
+
+static int option_transport_parse_size(const char *start, const char *end, size_t *value)
+{
+	size_t result = 0;
+	const char *p;
+
+	if (start == end || (end - start > 1 && *start == '0'))
+		return -EINVAL;
+	for (p = start; p < end; p++) {
+		unsigned int digit;
+
+		if (*p < '0' || *p > '9')
+			return -EINVAL;
+		digit = (unsigned int)(*p - '0');
+		if (result > (SIZE_MAX - digit) / 10)
+			return -EOVERFLOW;
+		result = result * 10 + digit;
+	}
+	*value = result;
+	return 0;
+}
+
+static int option_transport_decode_exact(const char *record,
+					 struct option_transport *transport)
+{
+	const char *p, *limit;
+	int err;
+
+	if (strncmp(record, MODPROBE_OPTIONS_EXACT_PREFIX,
+		    MODPROBE_OPTIONS_EXACT_PREFIX_LEN) != 0)
+		return -EINVAL;
+	p = record + MODPROBE_OPTIONS_EXACT_PREFIX_LEN;
+	limit = record + strlen(record);
+	while (p < limit) {
+		const char *colon = memchr(p, ':', (size_t)(limit - p));
+		const char *value;
+		char *copy;
+		size_t value_len;
+
+		if (colon == NULL || option_transport_parse_size(p, colon, &value_len) < 0)
+			return -EINVAL;
+		value = colon + 1;
+		if (value_len >= (size_t)(limit - value) || value[value_len] != ',')
+			return -EINVAL;
+		copy = strndup(value, value_len);
+		if (copy == NULL)
+			return -ENOMEM;
+		err = option_transport_append(transport, copy);
+		free(copy);
+		if (err < 0)
+			return err;
+		p = value + value_len + 1;
+	}
+	return 0;
+}
+
+static int option_transport_render_legacy(const char *base,
+					  const struct option_transport *generated,
+					  char **full_out)
+{
+	char *mirror = NULL, *full;
+	size_t base_len = strlen(base), mirror_len, len;
+	int err;
+
+	err = option_transport_encode_legacy(generated, &mirror);
+	if (err == -ENOTSUP) {
+		mirror = strdup(MODPROBE_OPTIONS_OLD_CHILD_FAILURE);
+		if (mirror == NULL)
+			return -ENOMEM;
+		err = 0;
+	}
+	if (err < 0)
+		return err;
+	mirror_len = strlen(mirror);
+	if (uaddsz_overflow(base_len, mirror_len, &len) ||
+	    (base_len > 0 && mirror_len > 0 && uaddsz_overflow(len, 1, &len)) ||
+	    uaddsz_overflow(len, 1, &len)) {
+		free(mirror);
+		return -EOVERFLOW;
+	}
+	full = malloc(len);
+	if (full == NULL) {
+		free(mirror);
+		return -ENOMEM;
+	}
+	if (base_len > 0)
+		memcpy(full, base, base_len);
+	if (base_len > 0 && mirror_len > 0)
+		full[base_len++] = ' ';
+	memcpy(full + base_len, mirror, mirror_len + 1);
+	free(mirror);
+	*full_out = full;
+	return 0;
+}
+
+static int option_transport_publish(const char *base,
+				    const struct option_transport *generated)
+{
+	char *exact = NULL, *legacy = NULL;
+	char base_len[3 * sizeof(size_t) + 1];
+	int err;
+
+	err = option_transport_encode_exact(generated, &exact);
+	if (err < 0)
+		goto error;
+	err = option_transport_render_legacy(base, generated, &legacy);
+	if (err < 0)
+		goto error;
+	sprintf(base_len, "%zu", strlen(base));
+	if (setenv(MODPROBE_OPTIONS_EXACT_ENV, exact, 1) < 0 ||
+	    setenv(MODPROBE_OPTIONS_BASE_LEN_ENV, base_len, 1) < 0) {
+		err = -errno;
+		goto error;
+	}
+	if (*legacy == '\0') {
+		if (unsetenv("MODPROBE_OPTIONS") < 0) {
+			err = -errno;
+			goto error;
+		}
+	} else if (setenv("MODPROBE_OPTIONS", legacy, 1) < 0) {
+		err = -errno;
+		goto error;
+	}
+	free(legacy);
+	free(exact);
+	return 0;
+
+error:
+	ERR("could not publish recursive modprobe options: %s\n", strerror(-err));
+	free(legacy);
+	free(exact);
+	return err;
+}
+
+static char **prepend_options_from_string(int *p_argc, char **orig_argv, const char *env)
+{
+	const char *p;
 	char **new_argv, *str_end, *str, *s, *quote;
 	int i, argc = *p_argc;
 	size_t envlen, space_count = 0;
@@ -788,10 +1063,274 @@ static char **prepend_options_from_env(int *p_argc, char **orig_argv)
 	return new_argv;
 }
 
+static int option_transport_from_legacy(const char *base,
+					struct option_transport *transport)
+{
+	char *dummy_argv[] = { (char *)"modprobe", NULL };
+	char **argv;
+	int argc = 1, i, err;
+
+	if (*base == '\0')
+		return 0;
+	argv = prepend_options_from_string(&argc, dummy_argv, base);
+	if (argv == NULL)
+		return -ENOMEM;
+	for (i = 1; i < argc; i++) {
+		err = option_transport_append(transport, argv[i]);
+		if (err < 0) {
+			free(argv);
+			return err;
+		}
+	}
+	free(argv);
+	return 0;
+}
+
+static char **option_transport_build_argv(const struct option_transport *options,
+					  int argc, char **orig_argv, int *argc_out)
+{
+	char **argv;
+	char *storage;
+	size_t i, pointers, pointer_bytes, storage_bytes = 0, alloc_size;
+	int outc;
+
+	for (i = 0; i < options->count; i++) {
+		size_t bytes;
+		if (uaddsz_overflow(strlen(options->args[i]), 1, &bytes) ||
+		    uaddsz_overflow(storage_bytes, bytes, &storage_bytes))
+			return NULL;
+	}
+	if (uaddsz_overflow((size_t)argc, options->count, &pointers) ||
+	    uaddsz_overflow(pointers, 1, &pointers) ||
+	    umulsz_overflow(pointers, sizeof(*argv), &pointer_bytes) ||
+	    uaddsz_overflow(pointer_bytes, storage_bytes, &alloc_size))
+		return NULL;
+	argv = malloc(alloc_size);
+	if (argv == NULL)
+		return NULL;
+	storage = (char *)(argv + pointers);
+	argv[0] = orig_argv[0];
+	outc = 1;
+	for (i = 0; i < options->count; i++) {
+		size_t bytes = strlen(options->args[i]) + 1;
+		argv[outc++] = storage;
+		memcpy(storage, options->args[i], bytes);
+		storage += bytes;
+	}
+	memcpy(argv + outc, orig_argv + 1, sizeof(*argv) * (argc - 1));
+	outc += argc - 1;
+	argv[outc] = NULL;
+	*argc_out = outc;
+	return argv;
+}
+
+static int option_transport_collect_propagated(int argc, char **argv,
+					       struct option_transport *transport)
+{
+	char **copy;
+	int c, idx, err = 0;
+	int saved_optind = optind, saved_opterr = opterr, saved_optopt = optopt;
+	char *saved_optarg = optarg;
+
+	copy = malloc(sizeof(*copy) * (argc + 1));
+	if (copy == NULL)
+		return -ENOMEM;
+	memcpy(copy, argv, sizeof(*copy) * (argc + 1));
+	optind = 0;
+	opterr = 0;
+	for (;;) {
+		idx = 0;
+		c = getopt_long(argc, copy, cmdopts_s, cmdopts, &idx);
+		if (c == -1)
+			break;
+		switch (c) {
+		case 'C':
+			err = option_transport_append(transport, "-C");
+			if (err == 0)
+				err = option_transport_append(transport, optarg);
+			break;
+		case 's':
+			err = option_transport_append(transport, "-s");
+			break;
+		case 'q':
+			err = option_transport_append(transport, "-q");
+			break;
+		case 'v':
+			err = option_transport_append(transport, "-v");
+			break;
+		case '?':
+			goto out;
+		default:
+			break;
+		}
+		if (err < 0)
+			break;
+	}
+out:
+	optind = saved_optind;
+	opterr = saved_opterr;
+	optopt = saved_optopt;
+	optarg = saved_optarg;
+	free(copy);
+	return err;
+}
+
+static int option_transport_validate_generated(const struct option_transport *generated)
+{
+	struct option_transport selected = {};
+	char *dummy_argv[] = { (char *)"modprobe", NULL };
+	char **argv = NULL;
+	int argc, err;
+	size_t i;
+
+	argv = option_transport_build_argv(generated, 1, dummy_argv, &argc);
+	if (argv == NULL)
+		return -ENOMEM;
+	err = option_transport_collect_propagated(argc, argv, &selected);
+	if (err < 0)
+		goto done;
+	if (selected.count != generated->count) {
+		err = -EINVAL;
+		goto done;
+	}
+	for (i = 0; i < generated->count; i++) {
+		if (!streq(selected.args[i], generated->args[i])) {
+			err = -EINVAL;
+			goto done;
+		}
+	}
+	err = 0;
+
+done:
+	free(argv);
+	option_transport_clear(&selected);
+	return err;
+}
+
+static int option_transport_load_environment(char **base_out,
+					     struct option_transport *generated,
+					     struct option_transport *environment)
+{
+	const char *exact = getenv(MODPROBE_OPTIONS_EXACT_ENV);
+	const char *legacy = getenv("MODPROBE_OPTIONS");
+	struct option_transport base_options = {};
+	char *base = NULL, *expected = NULL;
+	int err;
+
+	if (legacy == NULL)
+		legacy = "";
+	if (exact == NULL) {
+		base = strdup(legacy);
+		if (base == NULL)
+			return -ENOMEM;
+	} else {
+		const char *base_len_text = getenv(MODPROBE_OPTIONS_BASE_LEN_ENV);
+		size_t base_len;
+
+		if (base_len_text == NULL ||
+		    option_transport_parse_size(base_len_text,
+						base_len_text + strlen(base_len_text),
+						&base_len) < 0 ||
+		    base_len > strlen(legacy)) {
+			err = -EINVAL;
+			goto error;
+		}
+		err = option_transport_decode_exact(exact, generated);
+		if (err < 0)
+			goto error;
+		err = option_transport_validate_generated(generated);
+		if (err < 0)
+			goto error;
+		base = strndup(legacy, base_len);
+		if (base == NULL) {
+			err = -ENOMEM;
+			goto error;
+		}
+		err = option_transport_render_legacy(base, generated, &expected);
+		if (err < 0)
+			goto error;
+		if (!streq(expected, legacy)) {
+			char *rebased = strdup(legacy);
+
+			if (rebased == NULL) {
+				err = -ENOMEM;
+				goto error;
+			}
+			free(base);
+			base = rebased;
+			option_transport_clear(generated);
+		}
+	}
+
+	err = option_transport_from_legacy(base, &base_options);
+	if (err < 0)
+		goto error;
+	err = option_transport_append_all(environment, &base_options, 0);
+	if (err == 0)
+		err = option_transport_append_all(environment, generated, 0);
+	if (err < 0)
+		goto error;
+	option_transport_clear(&base_options);
+	free(expected);
+	*base_out = base;
+	return 0;
+
+error:
+	ERR("could not load recursive modprobe option state\n");
+	option_transport_clear(&base_options);
+	option_transport_clear(environment);
+	option_transport_clear(generated);
+	free(expected);
+	free(base);
+	return err;
+}
+
+static int option_transport_derive_cli(const struct option_transport *environment,
+				       int argc, char **orig_argv,
+				       struct option_transport *cli)
+{
+	struct option_transport env_selected = {}, full_selected = {};
+	char *dummy_argv[] = { orig_argv[0], NULL };
+	char **env_argv = NULL, **full_argv = NULL;
+	int env_argc, full_argc, err;
+	size_t i;
+
+	env_argv = option_transport_build_argv(environment, 1, dummy_argv, &env_argc);
+	full_argv = option_transport_build_argv(environment, argc, orig_argv, &full_argc);
+	if (env_argv == NULL || full_argv == NULL) {
+		err = -ENOMEM;
+		goto done;
+	}
+	err = option_transport_collect_propagated(env_argc, env_argv, &env_selected);
+	if (err < 0)
+		goto done;
+	err = option_transport_collect_propagated(full_argc, full_argv, &full_selected);
+	if (err < 0)
+		goto done;
+	if (env_selected.count > full_selected.count) {
+		err = -EINVAL;
+		goto done;
+	}
+	for (i = 0; i < env_selected.count; i++) {
+		if (!streq(env_selected.args[i], full_selected.args[i])) {
+			err = -EINVAL;
+			goto done;
+		}
+	}
+	err = option_transport_append_all(cli, &full_selected, env_selected.count);
+
+done:
+	free(full_argv);
+	free(env_argv);
+	option_transport_clear(&full_selected);
+	option_transport_clear(&env_selected);
+	return err;
+}
+
 static int do_modprobe(int argc, char **orig_argv)
 {
 	struct kmod_ctx *ctx;
-	char **args = NULL, **argv;
+	char **args = NULL, **argv = NULL;
 	const char **config_paths = NULL;
 	int nargs = 0, n_config_paths = 0;
 	char dirname_buf[PATH_MAX];
@@ -806,12 +1345,26 @@ static int do_modprobe(int argc, char **orig_argv)
 	int err, c;
 	struct stat stat_buf;
 	bool use_syslog = false;
+	struct option_transport generated = {};
+	struct option_transport environment = {};
+	struct option_transport cli = {};
+	char *legacy_base = NULL;
 
-	argv = prepend_options_from_env(&argc, orig_argv);
-	if (argv == NULL) {
-		ERR("Could not prepend options from environment\n");
+	err = option_transport_load_environment(&legacy_base, &generated, &environment);
+	if (err < 0)
 		return EXIT_FAILURE;
+	err = option_transport_derive_cli(&environment, argc, orig_argv, &cli);
+	if (err < 0)
+		goto done;
+	err = option_transport_append_all(&generated, &cli, 0);
+	if (err < 0)
+		goto done;
+	argv = option_transport_build_argv(&environment, argc, orig_argv, &argc);
+	if (argv == NULL) {
+		err = -ENOMEM;
+		goto done;
 	}
+	optind = 0;
 
 	opterr = 0;
 	while ((c = getopt_long(argc, argv, cmdopts_s, cmdopts, NULL)) != -1) {
@@ -905,8 +1458,6 @@ static int do_modprobe(int argc, char **orig_argv)
 			n_config_paths++;
 			config_paths[n_config_paths] = NULL;
 
-			env_modprobe_options_append("-C");
-			env_modprobe_options_append(optarg);
 			break;
 		}
 		case 'd':
@@ -916,15 +1467,12 @@ static int do_modprobe(int argc, char **orig_argv)
 			kversion = optarg;
 			break;
 		case 's':
-			env_modprobe_options_append("-s");
 			use_syslog = true;
 			break;
 		case 'q':
-			env_modprobe_options_append("-q");
 			verbose = LOG_EMERG;
 			break;
 		case 'v':
-			env_modprobe_options_append("-v");
 			verbose++;
 			break;
 		case 'V':
@@ -946,6 +1494,10 @@ static int do_modprobe(int argc, char **orig_argv)
 			goto done;
 		}
 	}
+
+	err = option_transport_publish(legacy_base, &generated);
+	if (err < 0)
+		goto done;
 
 	args = argv + optind;
 	nargs = argc - optind;
@@ -1023,10 +1575,13 @@ static int do_modprobe(int argc, char **orig_argv)
 done:
 	log_close();
 
-	if (argv != orig_argv)
-		free(argv);
+	free(argv);
 
 	free(config_paths);
+	free(legacy_base);
+	option_transport_clear(&cli);
+	option_transport_clear(&environment);
+	option_transport_clear(&generated);
 
 	return err >= 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

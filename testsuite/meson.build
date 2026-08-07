@@ -27,10 +27,11 @@ create_rootfs = custom_target(
     f'@project_build_root@/config.h',
     sysconfdir,
     moduledir,
+    f'@project_build_root@/depmod',
   ],
   output : 'stamp-rootfs',
   console : true,
-  depends : build_module_playground,
+  depends : [build_module_playground, internal_kmod_symlinks[0]],
   build_always_stale : true, # TODO: only when the rootfs has changed
   build_by_default : false,
 )

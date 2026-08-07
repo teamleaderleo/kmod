@@ -179,6 +179,185 @@ DEFINE_TEST(modprobe_install_cmd_loop,
 	.modules_loaded = "mod-loop-b,mod-loop-a",
 	);
 
+#define MODPROBE_EXACT_RECURSIVE_ROOTFS \
+	TESTSUITE_ROOTFS "test-modprobe/exact-options-recursive"
+#define MODPROBE_EXACT_POLICY_ROOTFS TESTSUITE_ROOTFS "test-modprobe/exact-options-policy"
+#define MODPROBE_EXACT_PROVENANCE_ROOTFS \
+	TESTSUITE_ROOTFS "test-modprobe/exact-options-provenance"
+
+static int modprobe_exact_options_recursive(void)
+{
+	return EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");
+}
+DEFINE_TEST(modprobe_exact_options_recursive,
+	.description = "check exact recursive options remain stable through three levels",
+	.config = {
+		[TC_UNAME_R] = "4.4.4",
+		[TC_ROOTFS] = MODPROBE_EXACT_RECURSIVE_ROOTFS,
+	},
+	.env_vars = (const struct keyval[]) {
+		{ "MODPROBE", TOOLS_DIR "/modprobe" },
+		{ }
+		},
+	.output = {
+		.out = MODPROBE_EXACT_RECURSIVE_ROOTFS "/correct.txt",
+		.files = (const struct keyval[]) {
+			{ MODPROBE_EXACT_RECURSIVE_ROOTFS "/correct-lengths.txt",
+			  MODPROBE_EXACT_RECURSIVE_ROOTFS "/exact-options-lengths.txt" },
+			{ },
+		},
+	},
+	.modules_loaded = "",
+	);
+
+static int modprobe_exact_options_generated(void)
+{
+	return EXEC_TOOL(modprobe, "--show-alias", "exact-marker");
+}
+DEFINE_TEST(modprobe_exact_options_generated,
+	.description = "check exact generated options are reconstructed after an inherited base",
+	.config = {
+		[TC_UNAME_R] = "4.4.4",
+		[TC_ROOTFS] = MODPROBE_EXACT_POLICY_ROOTFS,
+	},
+	.env_vars = (const struct keyval[]) {
+		{ "KMOD_MODPROBE_OPTIONS_EXACT", "KMOD1;2:-C,13:/exact config," },
+		{ "KMOD_MODPROBE_OPTIONS_BASE_LEN", "19" },
+		{ "MODPROBE_OPTIONS", "-C '/legacy config' -C '/exact config'" },
+		{ }
+		},
+	.output = {
+		.out = MODPROBE_EXACT_POLICY_ROOTFS "/correct-exact.txt",
+	},
+	.modules_loaded = "",
+	);
+
+static int modprobe_exact_options_empty(void)
+{
+	return EXEC_TOOL(modprobe, "--show-alias", "legacy-marker");
+}
+DEFINE_TEST(modprobe_exact_options_empty,
+	.description = "check an empty generated exact suffix preserves the inherited base",
+	.config = {
+		[TC_UNAME_R] = "4.4.4",
+		[TC_ROOTFS] = MODPROBE_EXACT_POLICY_ROOTFS,
+	},
+	.env_vars = (const struct keyval[]) {
+		{ "KMOD_MODPROBE_OPTIONS_EXACT", "KMOD1;" },
+		{ "KMOD_MODPROBE_OPTIONS_BASE_LEN", "19" },
+		{ "MODPROBE_OPTIONS", "-C '/legacy config'" },
+		{ }
+		},
+	.output = {
+		.out = MODPROBE_EXACT_POLICY_ROOTFS "/correct-legacy.txt",
+	},
+	.modules_loaded = "",
+	);
+
+DEFINE_TEST_WITH_FUNC(modprobe_exact_options_malformed, modprobe_exact_options_generated,
+	.description = "check malformed exact records fail instead of falling back",
+	.config = {
+		[TC_UNAME_R] = "4.4.4",
+		[TC_ROOTFS] = MODPROBE_EXACT_POLICY_ROOTFS,
+	},
+	.env_vars = (const struct keyval[]) {
+		{ "KMOD_MODPROBE_OPTIONS_EXACT", "KMOD1;2:-C,13:/exact config" },
+		{ "KMOD_MODPROBE_OPTIONS_BASE_LEN", "0" },
+		{ "MODPROBE_OPTIONS", "" },
+		{ }
+		},
+	.expected_fail = true,
+	.modules_loaded = "",
+	);
+
+DEFINE_TEST_WITH_FUNC(modprobe_exact_options_reject_positional,
+	modprobe_exact_options_generated,
+	.description = "check exact records accept only deliberately propagated options",
+	.config = {
+		[TC_UNAME_R] = "4.4.4",
+		[TC_ROOTFS] = MODPROBE_EXACT_POLICY_ROOTFS,
+	},
+	.env_vars = (const struct keyval[]) {
+		{ "KMOD_MODPROBE_OPTIONS_EXACT", "KMOD1;4:evil," },
+		{ "KMOD_MODPROBE_OPTIONS_BASE_LEN", "0" },
+		{ "MODPROBE_OPTIONS", "evil" },
+		{ }
+		},
+	.expected_fail = true,
+	.modules_loaded = "",
+	);
+
+static int modprobe_legacy_raw_backslash(void)
+{
+	return EXEC_TOOL(modprobe, "--show-alias", "raw-marker");
+}
+DEFINE_TEST(modprobe_legacy_raw_backslash,
+	.description = "check legacy raw backslashes remain literal without an exact record",
+	.config = {
+		[TC_UNAME_R] = "4.4.4",
+		[TC_ROOTFS] = MODPROBE_EXACT_POLICY_ROOTFS,
+	},
+	.env_vars = (const struct keyval[]) {
+		{ "MODPROBE_OPTIONS", "-C /raw\\config" },
+		{ }
+		},
+	.output = {
+		.out = MODPROBE_EXACT_POLICY_ROOTFS "/correct-exact.txt",
+	},
+	.modules_loaded = "",
+	);
+
+static int modprobe_exact_options_legacy_mutation(void)
+{
+	return EXEC_TOOL(modprobe, "-C", "/mutation-config", "mod-loop-b");
+}
+DEFINE_TEST(modprobe_exact_options_legacy_mutation,
+	.description = "check a modified legacy mirror rebases through the current parser",
+	.config = {
+		[TC_UNAME_R] = "4.4.4",
+		[TC_ROOTFS] = MODPROBE_EXACT_POLICY_ROOTFS,
+	},
+	.env_vars = (const struct keyval[]) {
+		{ "MODPROBE", TOOLS_DIR "/modprobe" },
+		{ }
+		},
+	.output = {
+		.out = MODPROBE_EXACT_POLICY_ROOTFS "/correct-exact.txt",
+	},
+	.modules_loaded = "",
+	);
+
+static int modprobe_legacy_empty_options(void)
+{
+	return EXEC_TOOL(modprobe, "--version");
+}
+DEFINE_TEST(
+	modprobe_legacy_empty_options,
+	.description = "check an explicitly empty legacy option string is zero arguments",
+	.env_vars = (const struct keyval[]){ { "MODPROBE_OPTIONS", "" }, {} }, );
+
+static int modprobe_exact_options_inherited_root(void)
+{
+	return EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");
+}
+DEFINE_TEST(modprobe_exact_options_inherited_root,
+	.description = "check inherited private options remain in recursive children",
+	.config = {
+		[TC_UNAME_R] = "4.4.4",
+		[TC_ROOTFS] = MODPROBE_EXACT_PROVENANCE_ROOTFS,
+	},
+	.env_vars = (const struct keyval[]) {
+		{ "MODPROBE", TOOLS_DIR "/modprobe" },
+		{ "MODPROBE_OPTIONS", "-d /custom-root" },
+		{ }
+		},
+	.output = {
+		.out = MODPROBE_EXACT_PROVENANCE_ROOTFS "/correct.txt",
+		.regex = true,
+	},
+	.modules_loaded = "",
+	);
+
 static int modprobe_param_kcmdline_show_deps(void)
 {
 	return EXEC_TOOL(modprobe, "--show-depends", "mod-simple");

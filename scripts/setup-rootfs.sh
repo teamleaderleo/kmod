@@ -8,6 +8,7 @@ MODULE_PLAYGROUND=$3
 CONFIG_H=$4
 SYSCONFDIR=$5
 MODULE_DIRECTORY=$6
+DEPMOD=$7
 
 # create rootfs from rootfs-pristine
 
@@ -91,6 +92,14 @@ map=(
     ["test-modprobe/weakdep-loop$MODULE_DIRECTORY/4.4.4/kernel/mod-simple.ko"]="mod-simple.ko"
     ["test-modprobe/install-cmd-loop$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-a.ko"]="mod-loop-a.ko"
     ["test-modprobe/install-cmd-loop$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-b.ko"]="mod-loop-b.ko"
+    ["test-modprobe/exact-options-recursive$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-a.ko"]="mod-loop-a.ko"
+    ["test-modprobe/exact-options-recursive$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-b.ko"]="mod-loop-b.ko"
+    ["test-modprobe/exact-options-recursive$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-c.ko"]="mod-loop-c.ko"
+    ["test-modprobe/exact-options-recursive$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-d.ko"]="mod-loop-d.ko"
+    ["test-modprobe/exact-options-policy$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-a.ko"]="mod-loop-a.ko"
+    ["test-modprobe/exact-options-policy$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-b.ko"]="mod-loop-b.ko"
+    ["test-modprobe/exact-options-provenance/custom-root$MODULE_DIRECTORY/4.4.4/kernel/mod-loop-b.ko"]="mod-loop-b.ko"
+    ["test-modprobe/exact-options-provenance/custom-root$MODULE_DIRECTORY/4.4.4/kernel/mod-simple.ko"]="mod-simple.ko"
     ["test-modprobe/force$MODULE_DIRECTORY/4.4.4/kernel/"]="mod-simple.ko"
     ["test-modprobe/force-modversion$MODULE_DIRECTORY/4.4.4/kernel/"]="mod-simple.ko"
     ["test-modprobe/force-vermagic$MODULE_DIRECTORY/4.4.4/kernel/"]="mod-simple.ko"
@@ -198,5 +207,9 @@ done
 for m in "${attach_pkcs7_array[@]}"; do
     cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"
 done
+
+"$DEPMOD" -b \
+    "$ROOTFS/test-modprobe/exact-options-provenance/custom-root" \
+    4.4.4
 
 touch testsuite/stamp-rootfs
