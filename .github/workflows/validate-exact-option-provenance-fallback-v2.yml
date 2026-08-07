@@ -66,7 +66,7 @@ jobs:
           echo 'caed53a3a7f5dc57f2d4114da21a623dfd9ea1343881bdced3617adf30ecee32  '"$strict_patch" | sha256sum --check
           git apply --check "$strict_patch"
 
-      - name: Recover and apply fallback payload
+      - name: Recover and diagnose fallback payload
         shell: bash
         run: |
           set -euo pipefail
@@ -89,24 +89,18 @@ jobs:
             > "$RUNNER_TEMP/apply-normal.out" \
             2> "$RUNNER_TEMP/apply-normal.err"
           normal_status=$?
+          git apply --recount --check --index "$patch" \
+            > "$RUNNER_TEMP/apply-recount.out" \
+            2> "$RUNNER_TEMP/apply-recount.err"
+          recount_status=$?
           set -e
           printf '%s\n' "$normal_status" > "$RUNNER_TEMP/apply-normal.status"
+          printf '%s\n' "$recount_status" > "$RUNNER_TEMP/apply-recount.status"
+          test "$normal_status" -ne 0
+          test "$recount_status" -ne 0
 
-          recovery_mode=normal
-          if [[ "$normal_status" -ne 0 ]]; then
-            set +e
-            git apply --recount --check --index "$patch" \
-              > "$RUNNER_TEMP/apply-recount.out" \
-              2> "$RUNNER_TEMP/apply-recount.err"
-            recount_status=$?
-            set -e
-            printf '%s\n' "$recount_status" > "$RUNNER_TEMP/apply-recount.status"
-            if [[ "$recount_status" -ne 0 ]]; then
-              echo 'normal apply error:'
-              cat "$RUNNER_TEMP/apply-normal.err"
-              echo 'recount apply error:'
-              cat "$RUNNER_TEMP/apply-recount.err"
-              PATCH="$patch" STRICT_PATCH="$RUNNER_TEMP/strict.patch" python3 - <<'PY'
+          PATCH="$patch" STRICT_PATCH="$RUNNER_TEMP/strict.patch" python3 - <<'PY'
+          import difflib
           import os
           import pathlib
           import subprocess
@@ -114,13 +108,17 @@ jobs:
 
           patch = pathlib.Path(os.environ["PATCH"]).read_text(errors="surrogateescape")
           strict_patch = pathlib.Path(os.environ["STRICT_PATCH"]).read_text(errors="surrogateescape")
-          lines = patch.splitlines(keepends=True)
-          starts = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
-          starts.append(len(lines))
-          print(f"diff sections: {len(starts) - 1}")
-          for n in range(len(starts) - 1):
-              section = "".join(lines[starts[n]:starts[n + 1]])
-              header = lines[starts[n]].rstrip("\n")
+
+          def sections(text):
+              lines = text.splitlines(keepends=True)
+              starts = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
+              starts.append(len(lines))
+              return ["".join(lines[starts[n]:starts[n + 1]]) for n in range(len(starts) - 1)]
+
+          fallback_sections = sections(patch)
+          strict_sections = sections(strict_patch)
+          print(f"fallback diff sections: {len(fallback_sections)}")
+          for n, section in enumerate(fallback_sections, 1):
               with tempfile.NamedTemporaryFile("w", delete=False, errors="surrogateescape") as f:
                   f.write(section)
                   name = f.name
@@ -131,73 +129,47 @@ jobs:
                   stderr=subprocess.PIPE,
               )
               os.unlink(name)
+              header = section.splitlines()[0]
               state = "OK" if result.returncode == 0 else "FAIL"
-              print(f"section {n + 1:02d}: {state}: {header}")
-              if result.returncode != 0:
-                  print(result.stderr.rstrip())
-                  section_lines = section.splitlines()
-                  bad = next(
-                      (i for i, line in enumerate(section_lines)
-                       if line.startswith("] = { (char *);")),
-                      None,
-                  )
-                  if bad is not None:
-                      print("--- corrupt-line neighborhood ---")
-                      lo = max(0, bad - 20)
-                      hi = min(len(section_lines), bad + 21)
-                      for i in range(lo, hi):
-                          print(f"{i + 1:04d}: {section_lines[i]}")
-                      print("--- end corrupt-line neighborhood ---")
+              print(f"section {n:02d}: {state}: {header}")
 
-          strict_lines = strict_patch.splitlines(keepends=True)
-          strict_starts = [i for i, line in enumerate(strict_lines) if line.startswith("diff --git ")]
-          strict_starts.append(len(strict_lines))
-          strict_tools = ""
-          for n in range(len(strict_starts) - 1):
-              section = "".join(strict_lines[strict_starts[n]:strict_starts[n + 1]])
-              if section.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"):
-                  strict_tools = section
-                  break
-          if strict_tools:
-              strict_tool_lines = strict_tools.splitlines()
-              anchors = [
-                  i for i, line in enumerate(strict_tool_lines)
-                  if "option_transport_clear(&selected);" in line
-              ]
-              print(f"strict reference anchors: {anchors}")
-              for anchor in anchors:
-                  print("--- strict-reference neighborhood ---")
-                  lo = max(0, anchor - 20)
-                  hi = min(len(strict_tool_lines), anchor + 81)
-                  for i in range(lo, hi):
-                      print(f"S{i + 1:04d}: {strict_tool_lines[i]}")
-                  print("--- end strict-reference neighborhood ---")
+          fallback_tools = next(s for s in fallback_sections if s.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"))
+          strict_tools = next(s for s in strict_sections if s.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"))
+          f = fallback_tools.splitlines()
+          s = strict_tools.splitlines()
+
+          bad = next((i for i, line in enumerate(f) if line.startswith("] = { (char *);")), None)
+          print(f"fallback corrupt marker index: {bad}")
+          if bad is not None:
+              print("--- fallback corrupt neighborhood ---")
+              for i in range(max(0, bad - 24), min(len(f), bad + 61)):
+                  print(f"F{i + 1:04d}: {f[i]}")
+              print("--- end fallback corrupt neighborhood ---")
+
+          matcher = difflib.SequenceMatcher(a=s, b=f, autojunk=False)
+          opcodes = matcher.get_opcodes()
+          print(f"alignment opcodes: {len(opcodes)}")
+          for tag, i1, i2, j1, j2 in opcodes:
+              if tag == "equal":
+                  if i2 - i1 >= 8:
+                      print(f"EQUAL strict[{i1 + 1}:{i2}] fallback[{j1 + 1}:{j2}] lines={i2 - i1}")
+                  continue
+              print(f"{tag.upper()} strict[{i1 + 1}:{i2}] fallback[{j1 + 1}:{j2}]")
+              if (i2 - i1) <= 120 and (j2 - j1) <= 120:
+                  for i in range(i1, i2):
+                      print(f"  S{i + 1:04d}: {s[i]}")
+                  for j in range(j1, j2):
+                      print(f"  F{j + 1:04d}: {f[j]}")
+
+          anchors = [i for i, line in enumerate(s) if "option_transport_clear(&selected);" in line]
+          print(f"strict reference anchors: {anchors}")
+          for anchor in anchors:
+              print("--- strict-reference neighborhood ---")
+              for i in range(max(0, anchor - 24), min(len(s), anchor + 121)):
+                  print(f"S{i + 1:04d}: {s[i]}")
+              print("--- end strict-reference neighborhood ---")
           PY
-              exit "$recount_status"
-            fi
-            recovery_mode=recount
-          else
-            printf 'not-needed\n' > "$RUNNER_TEMP/apply-recount.status"
-            : > "$RUNNER_TEMP/apply-recount.out"
-            : > "$RUNNER_TEMP/apply-recount.err"
-          fi
-          printf '%s\n' "$recovery_mode" | tee "$RUNNER_TEMP/recovery-mode.txt"
-
-          if [[ "$recovery_mode" == recount ]]; then
-            git apply --recount --index "$patch"
-          else
-            git apply --index "$patch"
-          fi
-          git diff --cached --check
-          git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/materialized-files.txt"
-          test "$(wc -l < "$RUNNER_TEMP/materialized-files.txt")" -eq 29
-          echo '1439259c98f50a66778b71c6f7cc5ce442edbf484ad735316a49401ec747e435  '"$RUNNER_TEMP/materialized-files.txt" | sha256sum --check
-          git diff --cached --binary > "$RUNNER_TEMP/materialized-fallback.patch"
-          sha256sum "$RUNNER_TEMP/materialized-fallback.patch" > \
-            "$RUNNER_TEMP/materialized-fallback.sha256"
-          echo '--- materialized product diff ---'
-          git diff --cached -- tools/modprobe.c testsuite/test-modprobe.c
-          echo '--- end materialized product diff ---'
+          exit "$recount_status"
 
       - name: Set up build dependencies
         shell: bash
@@ -209,32 +181,8 @@ jobs:
           CC: ${{ matrix.compiler }}
         run: |
           set -euo pipefail
-          clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
-          extra=()
-          if [[ "${{ matrix.compiler }}" == clang ]]; then
-            extra+=("-Db_lundef=false")
-          fi
-          meson setup --native-file build-dev.ini -Dmbedtls=disabled \
-            "${extra[@]}" build-${{ matrix.compiler }}
-          meson compile -C build-${{ matrix.compiler }}
-          if [[ "${{ matrix.compiler }}" == clang ]]; then
-            export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          fi
-          build-${{ matrix.compiler }}/modprobe --version | \
-            tee "$RUNNER_TEMP/modprobe-version-${{ matrix.compiler }}.txt"
-          for pass in first rerun; do
-            meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
-            meson test -C build-${{ matrix.compiler }} test-modprobe --verbose \
-              2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
-          done
-          meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
-          meson test -C build-${{ matrix.compiler }} --print-errorlogs \
-            2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
-          python3 .github/test-modprobe-option-provenance-fallback.py \
-            "$PWD/build-${{ matrix.compiler }}/modprobe" \
-            > "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
-          sha256sum build-${{ matrix.compiler }}/modprobe > \
-            "$RUNNER_TEMP/modprobe-${{ matrix.compiler }}.sha256"
+          echo 'unreachable until a clean reconstructed carrier is introduced'
+          exit 1
 
       - name: Retain receipts
         if: always()
@@ -255,16 +203,6 @@ jobs:
              "$RUNNER_TEMP"/apply-recount.out \
              "$RUNNER_TEMP"/apply-recount.err \
              "$RUNNER_TEMP"/apply-recount.status \
-             "$RUNNER_TEMP"/recovery-mode.txt \
-             "$RUNNER_TEMP"/materialized-files.txt \
-             "$RUNNER_TEMP"/materialized-fallback.patch \
-             "$RUNNER_TEMP"/materialized-fallback.sha256 \
-             "$RUNNER_TEMP"/modprobe-version-${{ matrix.compiler }}.txt \
-             "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log \
-             "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log \
-             "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log \
-             "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json \
-             "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 \
              "$out/" 2>/dev/null || true
 
       - name: Restore carrier state
