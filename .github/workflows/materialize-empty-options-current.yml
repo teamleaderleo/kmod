@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - fix/modprobe-empty-options-current
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
