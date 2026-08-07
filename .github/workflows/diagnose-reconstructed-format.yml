@@ -1,0 +1,66 @@
+name: Diagnose reconstructed fallback formatting
+
+on:
+  push:
+    branches: [experiment/modprobe-exact-option-provenance-fallback-reconstructed]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format-owner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: experiment/modprobe-exact-option-provenance-fallback-reconstructed
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Materialize strict source and reconstructed policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show origin/experiment/modprobe-exact-option-provenance:.github/modprobe-exact-option-provenance.patch.gz.b64 | base64 -d > "$RUNNER_TEMP/strict.gz"
+          echo 'ae01646901a5bc8305a4869446344022e21be420414ab6074fa1e2a7a5be75bd  '"$RUNNER_TEMP/strict.gz" | sha256sum -c
+          gzip -dc "$RUNNER_TEMP/strict.gz" > "$RUNNER_TEMP/strict.patch"
+          echo 'caed53a3a7f5dc57f2d4114da21a623dfd9ea1343881bdced3617adf30ecee32  '"$RUNNER_TEMP/strict.patch" | sha256sum -c
+          git apply --check --index "$RUNNER_TEMP/strict.patch"
+          git apply --index "$RUNNER_TEMP/strict.patch"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/modprobe.c')
+          text = p.read_text()
+          old = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0 || !streq(expected, legacy)) {\n\t\t\tif (err >= 0)\n\t\t\t\terr = -EINVAL;\n\t\t\tgoto error;\n\t\t}\n'''
+          new = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0)\n\t\t\tgoto error;\n\t\tif (!streq(expected, legacy)) {\n\t\t\tchar *rebased = strdup(legacy);\n\n\t\t\tif (rebased == NULL) {\n\t\t\t\terr = -ENOMEM;\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\tfree(base);\n\t\t\tbase = rebased;\n\t\t\toption_transport_clear(generated);\n\t\t}\n'''
+          print('strict_block_match_count', text.count(old))
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new))
+          PY
+          clang-format -i tools/modprobe.c
+          git add tools/modprobe.c
+          git diff --cached --check
+
+      - name: Check tools formatting
+        shell: bash
+        run: clang-format --dry-run --Werror tools/modprobe.c
+
+      - name: Check test-modprobe formatting
+        shell: bash
+        run: clang-format --dry-run --Werror testsuite/test-modprobe.c
+
+      - name: Check complete staged diff formatting pair
+        shell: bash
+        run: clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
+
+      - name: Restore clean branch
+        if: always()
+        shell: bash
+        run: |
+          git reset --hard HEAD
+          git clean -fdx
+          test -z "$(git status --short)"
