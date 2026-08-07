@@ -1,0 +1,207 @@
+name: Validate reconstructed provenance fallback on current master
+
+on:
+  push:
+    branches: [experiment/modprobe-provenance-fallback-current-master]
+  pull_request:
+    branches: [internal/provenance-fallback-current-base]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: current-provenance-fallback-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  current-candidate:
+    name: current fallback (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      KDIR: any
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Check out current-master carrier
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: experiment/modprobe-provenance-fallback-current-master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact current base and recover inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=dae6c02ffed2e8d16da8dba16d974fc955eebb1f
+          test "$(git merge-base HEAD "$base")" = "$base"
+          test "$(git rev-parse "$base:tools/modprobe.c")" = c4b5021137a01529d75d9979e262308ce371bbae
+          git diff --quiet "$base" -- . ':(exclude).github'
+          git status --short | tee "$RUNNER_TEMP/status-before.txt"
+          test ! -s "$RUNNER_TEMP/status-before.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/carrier-head.txt"
+
+          git show origin/experiment/modprobe-exact-option-provenance:.github/modprobe-exact-option-provenance.patch.gz.b64 > "$RUNNER_TEMP/strict.b64"
+          base64 --decode "$RUNNER_TEMP/strict.b64" > "$RUNNER_TEMP/strict.gz"
+          echo 'ae01646901a5bc8305a4869446344022e21be420414ab6074fa1e2a7a5be75bd  '"$RUNNER_TEMP/strict.gz" | sha256sum --check
+          gzip -dc "$RUNNER_TEMP/strict.gz" > "$RUNNER_TEMP/strict.patch"
+          echo 'caed53a3a7f5dc57f2d4114da21a623dfd9ea1343881bdced3617adf30ecee32  '"$RUNNER_TEMP/strict.patch" | sha256sum --check
+
+          git show origin/experiment/modprobe-exact-option-provenance-fallback:.github/modprobe-exact-option-provenance-fallback.patch.gz.b64 > "$RUNNER_TEMP/fallback.b64"
+          echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  '"$RUNNER_TEMP/fallback.b64" | sha256sum --check
+          base64 --decode "$RUNNER_TEMP/fallback.b64" > "$RUNNER_TEMP/fallback.gz"
+          set +e
+          gzip -dc "$RUNNER_TEMP/fallback.gz" > "$RUNNER_TEMP/fallback.damaged.patch" 2> "$RUNNER_TEMP/fallback-gzip.err"
+          status=$?
+          set -e
+          test "$status" -ne 0
+          test -s "$RUNNER_TEMP/fallback.damaged.patch"
+
+          git show origin/experiment/modprobe-exact-option-provenance-fallback:.github/test-modprobe-option-provenance-fallback.py > "$RUNNER_TEMP/fallback-discriminator.py"
+          echo 'c1edefd417f0fbffdd31dc71d1aca390bf4a0e52e327e15d3447a977e77f5f08  '"$RUNNER_TEMP/fallback-discriminator.py" | sha256sum --check
+
+      - name: Rebase source and fixtures to exact current master
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH="$RUNNER_TEMP/fallback.damaged.patch" STRICT="$RUNNER_TEMP/strict.patch" FIXTURES="$RUNNER_TEMP/fixtures.patch" TOOLS="$RUNNER_TEMP/strict-tools.patch" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          def sections(text):
+              lines = text.splitlines(keepends=True)
+              starts = [i for i, line in enumerate(lines) if line.startswith('diff --git ')]
+              starts.append(len(lines))
+              return [''.join(lines[starts[i]:starts[i + 1]]) for i in range(len(starts) - 1)]
+
+          fallback = sections(Path(os.environ['PATCH']).read_text(errors='surrogateescape'))
+          strict = sections(Path(os.environ['STRICT']).read_text(errors='surrogateescape'))
+          assert len(fallback) == 29
+          assert fallback[28].startswith('diff --git a/tools/modprobe.c b/tools/modprobe.c')
+          Path(os.environ['FIXTURES']).write_text(''.join(fallback[:28]), errors='surrogateescape')
+          tools = next(s for s in strict if s.startswith('diff --git a/tools/modprobe.c b/tools/modprobe.c'))
+          Path(os.environ['TOOLS']).write_text(tools, errors='surrogateescape')
+          PY
+
+          git apply --3way --index "$RUNNER_TEMP/fixtures.patch"
+          git apply --3way --index "$RUNNER_TEMP/strict-tools.patch"
+          git diff --cached --check
+          git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/files-before-repair.txt"
+          test "$(wc -l < "$RUNNER_TEMP/files-before-repair.txt")" -eq 29
+          echo '6aa489e232b40998dc955ff205e16c4d65b6472b956cc395e2d212b45ab5608a  '"$RUNNER_TEMP/files-before-repair.txt" | sha256sum --check
+
+      - name: Apply validated fallback policy and fixture correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          setup = Path('scripts/setup-rootfs.sh')
+          text = setup.read_text()
+          old = '["test-modprobe/exact-options-provenance/custom-root$MODULE_DIRECTORY/4.4.4/kernel/custommodule.ko"]="mod-simple.ko"'
+          new = '["test-modprobe/exact-options-provenance/custom-root$MODULE_DIRECTORY/4.4.4/kernel/mod-simple.ko"]="mod-simple.ko"'
+          assert text.count(old) == 1
+          setup.write_text(text.replace(old, new))
+
+          conf = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/config dir/provenance.conf')
+          assert conf.read_text() == 'install mod-loop-b $MODPROBE --show-depends custommodule\n'
+          conf.write_text('install mod-loop-b $MODPROBE --show-depends mod-simple\n')
+
+          correct = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/correct.txt')
+          text = correct.read_text()
+          assert text.count('custommodule') == 1
+          correct.write_text(text.replace('custommodule', 'mod-simple'))
+
+          dep = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep')
+          text = dep.read_text()
+          assert text.count('kernel/custommodule.ko:') == 1
+          dep.write_text(text.replace('kernel/custommodule.ko:', 'kernel/mod-simple.ko:'))
+
+          modprobe = Path('tools/modprobe.c')
+          text = modprobe.read_text()
+          old = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0 || !streq(expected, legacy)) {\n\t\t\tif (err >= 0)\n\t\t\t\terr = -EINVAL;\n\t\t\tgoto error;\n\t\t}\n'''
+          new = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0)\n\t\t\tgoto error;\n\t\tif (!streq(expected, legacy)) {\n\t\t\tchar *rebased = strdup(legacy);\n\n\t\t\tif (rebased == NULL) {\n\t\t\t\terr = -ENOMEM;\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\tfree(base);\n\t\t\tbase = rebased;\n\t\t\toption_transport_clear(generated);\n\t\t}\n'''
+          assert text.count(old) == 1
+          modprobe.write_text(text.replace(old, new))
+          PY
+
+          clang-format -i tools/modprobe.c testsuite/test-modprobe.c
+          git add scripts/setup-rootfs.sh testsuite tools/modprobe.c
+          git diff --cached --check
+          clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
+          git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/files.txt"
+          echo '6aa489e232b40998dc955ff205e16c4d65b6472b956cc395e2d212b45ab5608a  '"$RUNNER_TEMP/files.txt" | sha256sum --check
+          git diff --cached --binary > "$RUNNER_TEMP/current-reconstructed.patch"
+          sha256sum "$RUNNER_TEMP/current-reconstructed.patch" > "$RUNNER_TEMP/current-reconstructed.sha256"
+          git diff --cached -- tools/modprobe.c > "$RUNNER_TEMP/tools-current.diff"
+          git diff --cached -- testsuite/test-modprobe.c > "$RUNNER_TEMP/tests-current.diff"
+
+      - name: Set up build dependencies
+        shell: bash
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Build and test exact current candidate
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "${{ matrix.compiler }}" == clang ]]; then extra+=("-Db_lundef=false"); fi
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled "${extra[@]}" build-${{ matrix.compiler }}
+          meson compile -C build-${{ matrix.compiler }}
+          if [[ "${{ matrix.compiler }}" == clang ]]; then export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
+          build-${{ matrix.compiler }}/modprobe --version > "$RUNNER_TEMP/version-${{ matrix.compiler }}.txt"
+
+          meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
+          root="$PWD/build-${{ matrix.compiler }}/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
+          build-${{ matrix.compiler }}/depmod -b "$root" 4.4.4
+          generated="$root/lib/modules/4.4.4/modules.dep.bin"
+          seed="$PWD/testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep.bin"
+          test -s "$generated"
+          cp "$generated" "$seed"
+          test -s "$seed"
+          sha256sum "$seed" > "$RUNNER_TEMP/provenance-modules.dep.bin-${{ matrix.compiler }}.sha256"
+
+          for pass in first rerun; do
+            meson test -C build-${{ matrix.compiler }} test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+            grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+            test -s "$root/lib/modules/4.4.4/modules.dep.bin"
+          done
+
+          meson test -C build-${{ matrix.compiler }} --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
+          python3 "$RUNNER_TEMP/fallback-discriminator.py" "$PWD/build-${{ matrix.compiler }}/modprobe" > "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
+          python3 -m json.tool "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
+          sha256sum build-${{ matrix.compiler }}/modprobe > "$RUNNER_TEMP/modprobe-${{ matrix.compiler }}.sha256"
+
+      - name: Retain receipts and restore carrier
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/current-${{ matrix.compiler }}"
+          mkdir -p "$out"
+          cp "$RUNNER_TEMP"/carrier-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/files-before-repair.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/current-reconstructed.patch "$RUNNER_TEMP"/current-reconstructed.sha256 "$RUNNER_TEMP"/tools-current.diff "$RUNNER_TEMP"/tests-current.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/provenance-modules.dep.bin-${{ matrix.compiler }}.sha256 "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
+          git reset --hard HEAD
+          git clean -fdx
+          git status --short | tee "$RUNNER_TEMP/status-after.txt"
+          test ! -s "$RUNNER_TEMP/status-after.txt"
+
+      - name: Upload current-master receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmod-current-provenance-fallback-${{ matrix.compiler }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/current-${{ matrix.compiler }}/
+            ${{ runner.temp }}/status-after.txt
+          if-no-files-found: warn
+          retention-days: 30

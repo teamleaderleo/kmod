@@ -1,0 +1,100 @@
+name: Validate source-owned recursive option candidate
+
+on:
+  push:
+    branches: [experiment/modprobe-provenance-fallback-current-master]
+  pull_request:
+    branches: [internal/provenance-fallback-current-base]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-owned-recursive-option-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-candidate:
+    name: source candidate (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      KDIR: any
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=1:strict_string_checks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Check out exact source candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: fix/modprobe-recursive-option-transport-current
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify source identity and fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=dae6c02ffed2e8d16da8dba16d974fc955eebb1f
+          test "$(git rev-parse HEAD)" = e6f63a629fa2cc2e7cef5949f71ddfab50d83165
+          test "$(git merge-base HEAD "$base")" = "$base"
+          test "$(git rev-parse "$base:tools/modprobe.c")" = c4b5021137a01529d75d9979e262308ce371bbae
+          git diff --check "$base" HEAD
+          git diff --name-only "$base" HEAD | LC_ALL=C sort > "$RUNNER_TEMP/files.txt"
+          test "$(wc -l < "$RUNNER_TEMP/files.txt")" -eq 30
+          git diff --binary "$base" HEAD > "$RUNNER_TEMP/source.patch"
+          sha256sum "$RUNNER_TEMP/source.patch" > "$RUNNER_TEMP/source.patch.sha256"
+          git rev-parse HEAD > "$RUNNER_TEMP/source-head.txt"
+
+      - name: Set up build dependencies
+        shell: bash
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Build and test source-owned fixture
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            extra+=("-Db_lundef=false")
+            export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled "${extra[@]}" build-${{ matrix.compiler }}
+          meson compile -C build-${{ matrix.compiler }}
+
+          root="$PWD/build-${{ matrix.compiler }}/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
+          for pass in first rerun; do
+            meson test -C build-${{ matrix.compiler }} test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+            grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+            test -s "$root/lib/modules/4.4.4/modules.dep.bin"
+          done
+
+          meson test -C build-${{ matrix.compiler }} --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
+          test -s "$root/lib/modules/4.4.4/modules.dep.bin"
+          sha256sum "$root/lib/modules/4.4.4/modules.dep.bin" > "$RUNNER_TEMP/modules.dep.bin-${{ matrix.compiler }}.sha256"
+          sha256sum build-${{ matrix.compiler }}/modprobe > "$RUNNER_TEMP/modprobe-${{ matrix.compiler }}.sha256"
+
+      - name: Retain receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-owned-recursive-option-${{ matrix.compiler }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/files.txt
+            ${{ runner.temp }}/source.patch
+            ${{ runner.temp }}/source.patch.sha256
+            ${{ runner.temp }}/source-head.txt
+            ${{ runner.temp }}/focused-${{ matrix.compiler }}-first.log
+            ${{ runner.temp }}/focused-${{ matrix.compiler }}-rerun.log
+            ${{ runner.temp }}/full-${{ matrix.compiler }}.log
+            ${{ runner.temp }}/modules.dep.bin-${{ matrix.compiler }}.sha256
+            ${{ runner.temp }}/modprobe-${{ matrix.compiler }}.sha256
+          if-no-files-found: warn
+          retention-days: 30

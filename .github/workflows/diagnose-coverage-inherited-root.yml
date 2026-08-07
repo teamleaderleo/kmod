@@ -1,0 +1,106 @@
+name: Diagnose coverage inherited-root fixture
+
+on:
+  push:
+    branches: [experiment/modprobe-provenance-fallback-current-master]
+  pull_request:
+    branches: [internal/provenance-fallback-current-base]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      KDIR: any
+    steps:
+      - name: Check out exact source candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: fix/modprobe-recursive-option-transport-current
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = f0cb3f70f567395748ea9235c39bb8a42af1f7c0
+          test "$(git rev-parse HEAD^)" = dae6c02ffed2e8d16da8dba16d974fc955eebb1f
+          git diff --check HEAD^
+          git diff --name-only HEAD^ HEAD | LC_ALL=C sort > "$RUNNER_TEMP/source-files.txt"
+          test "$(wc -l < "$RUNNER_TEMP/source-files.txt")" -eq 29
+          echo '6aa489e232b40998dc955ff205e16c4d65b6472b956cc395e2d212b45ab5608a  '"$RUNNER_TEMP/source-files.txt" | sha256sum --check
+
+      - name: Set up build dependencies
+        shell: bash
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Reproduce standard coverage failure verbosely
+        shell: bash
+        run: |
+          set -euo pipefail
+          meson setup --native-file build-dev.ini -D b_sanitize=none -D b_coverage=true -Dmbedtls=disabled builddir
+          meson compile -C builddir
+          set +e
+          meson test -C builddir test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/before.log"
+          before=${PIPESTATUS[0]}
+          set -e
+          echo "$before" > "$RUNNER_TEMP/before.status"
+          test "$before" -ne 0
+          grep -E 'FAILED:|PASSED:' "$RUNNER_TEMP/before.log" | tee "$RUNNER_TEMP/before.tests"
+
+      - name: Generate nested depmod index as part of rootfs creation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          meson = Path('testsuite/meson.build')
+          text = meson.read_text()
+          old = '''    sysconfdir,\n    moduledir,\n  ],\n'''
+          new = '''    sysconfdir,\n    moduledir,\n    internal_kmod_symlinks[0],\n  ],\n'''
+          assert text.count(old) == 1
+          meson.write_text(text.replace(old, new))
+
+          setup = Path('scripts/setup-rootfs.sh')
+          text = setup.read_text()
+          old = '''MODULE_DIRECTORY=$6\n'''
+          new = '''MODULE_DIRECTORY=$6\nDEPMOD=$7\n'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = '''for m in "${attach_pkcs7_array[@]}"; do\n    cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"\ndone\n\ntouch testsuite/stamp-rootfs\n'''
+          new = '''for m in "${attach_pkcs7_array[@]}"; do\n    cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"\ndone\n\n"$DEPMOD" -b "$ROOTFS/test-modprobe/exact-options-provenance/custom-root" 4.4.4\n\ntouch testsuite/stamp-rootfs\n'''
+          assert text.count(old) == 1
+          setup.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          meson setup --reconfigure builddir
+          meson compile -C builddir
+          meson test -C builddir test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/after.log"
+          grep -E 'FAILED:|PASSED:' "$RUNNER_TEMP/after.log" | tee "$RUNNER_TEMP/after.tests"
+          meson test -C builddir --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-after.log"
+          git diff -- scripts/setup-rootfs.sh testsuite/meson.build > "$RUNNER_TEMP/fixture-fix.diff"
+          sha256sum "$RUNNER_TEMP/fixture-fix.diff" > "$RUNNER_TEMP/fixture-fix.sha256"
+
+      - name: Upload diagnostic receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-inherited-root-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/source-files.txt
+            ${{ runner.temp }}/before.log
+            ${{ runner.temp }}/before.status
+            ${{ runner.temp }}/before.tests
+            ${{ runner.temp }}/after.log
+            ${{ runner.temp }}/after.tests
+            ${{ runner.temp }}/full-after.log
+            ${{ runner.temp }}/fixture-fix.diff
+            ${{ runner.temp }}/fixture-fix.sha256
+          if-no-files-found: warn
+          retention-days: 30
