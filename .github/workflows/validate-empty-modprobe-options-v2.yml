@@ -96,9 +96,6 @@ jobs:
           git diff --cached --check
           test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = \
             "testsuite/test-modprobe.c tools/modprobe.c "
-          echo '--- clang-format expected test block ---'
-          clang-format testsuite/test-modprobe.c | sed -n '180,198p'
-          echo '--- end clang-format expected test block ---'
           clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
           git diff --cached --binary > "$RUNNER_TEMP/materialized-empty-env.patch"
           sha256sum "$RUNNER_TEMP/materialized-empty-env.patch" > \
