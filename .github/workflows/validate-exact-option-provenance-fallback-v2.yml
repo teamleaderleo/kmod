@@ -120,6 +120,19 @@ jobs:
               print(f"section {n + 1:02d}: {state}: {header}")
               if result.returncode != 0:
                   print(result.stderr.rstrip())
+                  section_lines = section.splitlines()
+                  bad = next(
+                      (i for i, line in enumerate(section_lines)
+                       if line.startswith("] = { (char *);")),
+                      None,
+                  )
+                  if bad is not None:
+                      print("--- corrupt-line neighborhood ---")
+                      lo = max(0, bad - 20)
+                      hi = min(len(section_lines), bad + 21)
+                      for i in range(lo, hi):
+                          print(f"{i + 1:04d}: {section_lines[i]}")
+                      print("--- end corrupt-line neighborhood ---")
           PY
               exit "$recount_status"
             fi
