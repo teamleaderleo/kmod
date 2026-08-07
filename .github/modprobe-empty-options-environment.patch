@@ -1,16 +1,16 @@
 diff --git a/testsuite/test-modprobe.c b/testsuite/test-modprobe.c
-index 6b62644..2e38ba3 100644
+index 6b62644..f2ca4f3 100644
 --- a/testsuite/test-modprobe.c
 +++ b/testsuite/test-modprobe.c
 @@ -179,6 +179,18 @@ DEFINE_TEST(modprobe_install_cmd_loop,
  	.modules_loaded = "mod-loop-b,mod-loop-a",
  	);
  
-+static int modprobe_empty_options_environment(void)
++static int modprobe_empty_env(void)
 +{
 +	return EXEC_TOOL(modprobe, "--version");
 +}
-+DEFINE_TEST(modprobe_empty_options_environment,
++DEFINE_TEST(modprobe_empty_env,
 +	.description = "check modprobe accepts an explicitly empty MODPROBE_OPTIONS",
 +	.env_vars = (const struct keyval[]) {
 +		{ "MODPROBE_OPTIONS", "" },
