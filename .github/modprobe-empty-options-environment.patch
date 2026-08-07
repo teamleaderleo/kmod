@@ -1,0 +1,52 @@
+diff --git a/testsuite/test-modprobe.c b/testsuite/test-modprobe.c
+index 6b62644..f2ca4f3 100644
+--- a/testsuite/test-modprobe.c
++++ b/testsuite/test-modprobe.c
+@@ -179,6 +179,13 @@ DEFINE_TEST(modprobe_install_cmd_loop,
+ 	.modules_loaded = "mod-loop-b,mod-loop-a",
+ 	);
+ 
++static int modprobe_empty_env(void)
++{
++	return EXEC_TOOL(modprobe, "--version");
++}
++DEFINE_TEST(modprobe_empty_env, .description = "check empty MODPROBE_OPTIONS",
++	    .env_vars = (const struct keyval[]){ { "MODPROBE_OPTIONS", "" }, {} }, );
++
+ static int modprobe_param_kcmdline_show_deps(void)
+ {
+ 	return EXEC_TOOL(modprobe, "--show-depends", "mod-simple");
+diff --git a/tools/modprobe.c b/tools/modprobe.c
+index 413960c..3a164fb 100644
+--- a/tools/modprobe.c
++++ b/tools/modprobe.c
+@@ -735,12 +735,23 @@ static char **prepend_options_from_env(int *p_argc, char **orig_argv)
+ 	}
+ 
+ 	envlen = p - env;
+-	new_argv = malloc(sizeof(char *) * (argc + space_count + 3 + envlen));
+-	if (new_argv == NULL)
+-		return NULL;
+-
+-	new_argv[0] = orig_argv[0];
+-	str = (char *)(new_argv + argc + space_count + 3);
++	{
++		size_t pointer_count, pointer_bytes, string_bytes, alloc_size;
++
++		if (uaddsz_overflow((size_t)argc, space_count, &pointer_count) ||
++		    uaddsz_overflow(pointer_count, 3, &pointer_count) ||
++		    umulsz_overflow(pointer_count, sizeof(char *), &pointer_bytes) ||
++		    uaddsz_overflow(envlen, 1, &string_bytes) ||
++		    uaddsz_overflow(pointer_bytes, string_bytes, &alloc_size))
++			return NULL;
++
++		new_argv = malloc(alloc_size);
++		if (new_argv == NULL)
++			return NULL;
++
++		new_argv[0] = orig_argv[0];
++		str = (char *)new_argv + pointer_bytes;
++	}
+ 	memcpy(str, env, envlen + 1);
+ 
+ 	str_end = str + envlen;
