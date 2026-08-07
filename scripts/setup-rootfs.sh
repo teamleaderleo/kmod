@@ -8,6 +8,7 @@ MODULE_PLAYGROUND=$3
 CONFIG_H=$4
 SYSCONFDIR=$5
 MODULE_DIRECTORY=$6
+DEPMOD=$7
 
 # create rootfs from rootfs-pristine
 
@@ -206,5 +207,9 @@ done
 for m in "${attach_pkcs7_array[@]}"; do
     cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"
 done
+
+"$DEPMOD" -b \
+    "$ROOTFS/test-modprobe/exact-options-provenance/custom-root" \
+    4.4.4
 
 touch testsuite/stamp-rootfs
