@@ -30,7 +30,10 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = f0cb3f70f567395748ea9235c39bb8a42af1f7c0
           test "$(git rev-parse HEAD^)" = dae6c02ffed2e8d16da8dba16d974fc955eebb1f
-          git diff --quiet HEAD^ -- . ':(exclude).github'
+          git diff --check HEAD^
+          git diff --name-only HEAD^ HEAD | LC_ALL=C sort > "$RUNNER_TEMP/source-files.txt"
+          test "$(wc -l < "$RUNNER_TEMP/source-files.txt")" -eq 29
+          echo '6aa489e232b40998dc955ff205e16c4d65b6472b956cc395e2d212b45ab5608a  '"$RUNNER_TEMP/source-files.txt" | sha256sum --check
 
       - name: Set up build dependencies
         shell: bash
@@ -50,27 +53,38 @@ jobs:
           test "$before" -ne 0
           grep -E 'FAILED:|PASSED:' "$RUNNER_TEMP/before.log" | tee "$RUNNER_TEMP/before.tests"
 
-      - name: Try fixture-owned depmod setup
+      - name: Generate nested depmod index as part of rootfs creation
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('testsuite/test-modprobe.c')
-          text = p.read_text()
-          old = '''static int modprobe_exact_options_inherited_root(void)\n{\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
-          new = '''static int modprobe_exact_options_inherited_root(void)\n{\n\tint err;\n\n\terr = EXEC_TOOL(depmod, "-b", "/custom-root", "4.4.4");\n\tif (err != 0)\n\t\treturn err;\n\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
+
+          meson = Path('testsuite/meson.build')
+          text = meson.read_text()
+          old = '''    sysconfdir,\n    moduledir,\n  ],\n'''
+          new = '''    sysconfdir,\n    moduledir,\n    kmod,\n  ],\n'''
           assert text.count(old) == 1
-          p.write_text(text.replace(old, new))
+          meson.write_text(text.replace(old, new))
+
+          setup = Path('scripts/setup-rootfs.sh')
+          text = setup.read_text()
+          old = '''MODULE_DIRECTORY=$6\n'''
+          new = '''MODULE_DIRECTORY=$6\nKMOD=$7\n'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = '''for m in "${attach_pkcs7_array[@]}"; do\n    cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"\ndone\n\ntouch testsuite/stamp-rootfs\n'''
+          new = '''for m in "${attach_pkcs7_array[@]}"; do\n    cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"\ndone\n\n"$KMOD" depmod -b "$ROOTFS/test-modprobe/exact-options-provenance/custom-root" 4.4.4\n\ntouch testsuite/stamp-rootfs\n'''
+          assert text.count(old) == 1
+          setup.write_text(text.replace(old, new))
           PY
-          clang-format -i testsuite/test-modprobe.c
           git diff --check
-          clang-format --dry-run --Werror testsuite/test-modprobe.c
+          meson setup --reconfigure builddir
           meson compile -C builddir
           meson test -C builddir test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/after.log"
           grep -E 'FAILED:|PASSED:' "$RUNNER_TEMP/after.log" | tee "$RUNNER_TEMP/after.tests"
           meson test -C builddir --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-after.log"
-          git diff -- testsuite/test-modprobe.c > "$RUNNER_TEMP/fixture-fix.diff"
+          git diff -- scripts/setup-rootfs.sh testsuite/meson.build > "$RUNNER_TEMP/fixture-fix.diff"
           sha256sum "$RUNNER_TEMP/fixture-fix.diff" > "$RUNNER_TEMP/fixture-fix.sha256"
 
       - name: Upload diagnostic receipts
@@ -79,6 +93,7 @@ jobs:
         with:
           name: coverage-inherited-root-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/source-files.txt
             ${{ runner.temp }}/before.log
             ${{ runner.temp }}/before.status
             ${{ runner.temp }}/before.tests
