@@ -1,0 +1,89 @@
+name: Diagnose coverage inherited-root fixture
+
+on:
+  push:
+    branches: [experiment/modprobe-provenance-fallback-current-master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      KDIR: any
+    steps:
+      - name: Check out exact source candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: fix/modprobe-recursive-option-transport-current
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = f0cb3f70f567395748ea9235c39bb8a42af1f7c0
+          test "$(git rev-parse HEAD^)" = dae6c02ffed2e8d16da8dba16d974fc955eebb1f
+          git diff --quiet HEAD^ -- . ':(exclude).github'
+
+      - name: Set up build dependencies
+        shell: bash
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Reproduce standard coverage failure verbosely
+        shell: bash
+        run: |
+          set -euo pipefail
+          meson setup --native-file build-dev.ini -D b_sanitize=none -D b_coverage=true -Dmbedtls=disabled builddir
+          meson compile -C builddir
+          set +e
+          meson test -C builddir test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/before.log"
+          before=${PIPESTATUS[0]}
+          set -e
+          echo "$before" > "$RUNNER_TEMP/before.status"
+          test "$before" -ne 0
+          grep -E 'FAILED:|PASSED:' "$RUNNER_TEMP/before.log" | tee "$RUNNER_TEMP/before.tests"
+
+      - name: Try fixture-owned depmod setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('testsuite/test-modprobe.c')
+          text = p.read_text()
+          old = '''static int modprobe_exact_options_inherited_root(void)\n{\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
+          new = '''static int modprobe_exact_options_inherited_root(void)\n{\n\tint err;\n\n\terr = EXEC_TOOL(depmod, "-b", "/custom-root", "4.4.4");\n\tif (err != 0)\n\t\treturn err;\n\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new))
+          PY
+          clang-format -i testsuite/test-modprobe.c
+          git diff --check
+          clang-format --dry-run --Werror testsuite/test-modprobe.c
+          meson compile -C builddir
+          meson test -C builddir test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/after.log"
+          grep -E 'FAILED:|PASSED:' "$RUNNER_TEMP/after.log" | tee "$RUNNER_TEMP/after.tests"
+          meson test -C builddir --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-after.log"
+          git diff -- testsuite/test-modprobe.c > "$RUNNER_TEMP/fixture-fix.diff"
+          sha256sum "$RUNNER_TEMP/fixture-fix.diff" > "$RUNNER_TEMP/fixture-fix.sha256"
+
+      - name: Upload diagnostic receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-inherited-root-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/before.log
+            ${{ runner.temp }}/before.status
+            ${{ runner.temp }}/before.tests
+            ${{ runner.temp }}/after.log
+            ${{ runner.temp }}/after.tests
+            ${{ runner.temp }}/full-after.log
+            ${{ runner.temp }}/fixture-fix.diff
+            ${{ runner.temp }}/fixture-fix.sha256
+          if-no-files-found: warn
+          retention-days: 30
