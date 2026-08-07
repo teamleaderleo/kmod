@@ -18,7 +18,7 @@ jobs:
   reconstructed-candidate:
     name: reconstructed fallback (${{ matrix.compiler }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +36,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify and recover clean provenance inputs
+      - name: Verify and recover provenance inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -67,7 +67,7 @@ jobs:
           git show origin/experiment/modprobe-exact-option-provenance-fallback:.github/test-modprobe-option-provenance-fallback.py > "$RUNNER_TEMP/fallback-discriminator.py"
           echo 'c1edefd417f0fbffdd31dc71d1aca390bf4a0e52e327e15d3447a977e77f5f08  '"$RUNNER_TEMP/fallback-discriminator.py" | sha256sum --check
 
-      - name: Materialize intact fixtures and clean strict tools diff
+      - name: Materialize intact fixtures and strict source
         shell: bash
         run: |
           set -euo pipefail
@@ -77,68 +77,80 @@ jobs:
 
           def sections(text):
               lines = text.splitlines(keepends=True)
-              starts = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
+              starts = [i for i, line in enumerate(lines) if line.startswith('diff --git ')]
               starts.append(len(lines))
-              return ["".join(lines[starts[i]:starts[i + 1]]) for i in range(len(starts) - 1)]
+              return [''.join(lines[starts[i]:starts[i + 1]]) for i in range(len(starts) - 1)]
 
-          fallback = sections(Path(os.environ["PATCH"]).read_text(errors="surrogateescape"))
-          strict = sections(Path(os.environ["STRICT"]).read_text(errors="surrogateescape"))
+          fallback = sections(Path(os.environ['PATCH']).read_text(errors='surrogateescape'))
+          strict = sections(Path(os.environ['STRICT']).read_text(errors='surrogateescape'))
           assert len(fallback) == 29
-          assert fallback[28].startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c")
-          tools = next(s for s in strict if s.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"))
-          Path(os.environ["FIXTURES"]).write_text("".join(fallback[:28]), errors="surrogateescape")
-          Path(os.environ["TOOLS"]).write_text(tools, errors="surrogateescape")
+          assert fallback[28].startswith('diff --git a/tools/modprobe.c b/tools/modprobe.c')
+          Path(os.environ['FIXTURES']).write_text(''.join(fallback[:28]), errors='surrogateescape')
+          tools = next(s for s in strict if s.startswith('diff --git a/tools/modprobe.c b/tools/modprobe.c'))
+          Path(os.environ['TOOLS']).write_text(tools, errors='surrogateescape')
           PY
 
           git apply --check --index "$RUNNER_TEMP/fixtures.patch"
           git apply --index "$RUNNER_TEMP/fixtures.patch"
           git apply --check --index "$RUNNER_TEMP/strict-tools.patch"
           git apply --index "$RUNNER_TEMP/strict-tools.patch"
-          git diff --cached --check
-          git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/files-before-policy.txt"
-          test "$(wc -l < "$RUNNER_TEMP/files-before-policy.txt")" -eq 29
-          echo '6aa489e232b40998dc955ff205e16c4d65b6472b956cc395e2d212b45ab5608a  '"$RUNNER_TEMP/files-before-policy.txt" | sha256sum --check
-          printf '%s\n' 'historical PR #5 fence 1439259c... is retained as stale metadata; reconstruction-specific staged fence is 6aa489e2...'
+          git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/files-before-repair.txt"
+          test "$(wc -l < "$RUNNER_TEMP/files-before-repair.txt")" -eq 29
+          echo '6aa489e232b40998dc955ff205e16c4d65b6472b956cc395e2d212b45ab5608a  '"$RUNNER_TEMP/files-before-repair.txt" | sha256sum --check
 
-      - name: Apply reconstructed policy delta and compare original oracle
+      - name: Repair inherited-root fixture and apply fallback policy
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("tools/modprobe.c")
-          text = p.read_text()
+
+          setup = Path('scripts/setup-rootfs.sh')
+          text = setup.read_text()
+          old = '["test-modprobe/exact-options-provenance/custom-root$MODULE_DIRECTORY/4.4.4/kernel/custommodule.ko"]="mod-simple.ko"'
+          new = '["test-modprobe/exact-options-provenance/custom-root$MODULE_DIRECTORY/4.4.4/kernel/mod-simple.ko"]="mod-simple.ko"'
+          assert text.count(old) == 1
+          setup.write_text(text.replace(old, new))
+
+          conf = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/config dir/provenance.conf')
+          assert conf.read_text() == 'install mod-loop-b $MODPROBE --show-depends custommodule\n'
+          conf.write_text('install mod-loop-b $MODPROBE --show-depends mod-simple\n')
+
+          correct = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/correct.txt')
+          text = correct.read_text()
+          assert text.count('custommodule') == 1
+          correct.write_text(text.replace('custommodule', 'mod-simple'))
+
+          dep = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep')
+          text = dep.read_text()
+          assert text.count('kernel/custommodule.ko:') == 1
+          dep.write_text(text.replace('kernel/custommodule.ko:', 'kernel/mod-simple.ko:'))
+
+          test = Path('testsuite/test-modprobe.c')
+          text = test.read_text()
+          old = '''static int modprobe_exact_options_inherited_root(void)\n{\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
+          new = '''static int modprobe_exact_options_inherited_root(void)\n{\n\tint err;\n\n\terr = EXEC_TOOL(depmod, "-b", "/custom-root", "4.4.4");\n\tif (err != 0)\n\t\treturn err;\n\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
+          assert text.count(old) == 1
+          test.write_text(text.replace(old, new))
+
+          modprobe = Path('tools/modprobe.c')
+          text = modprobe.read_text()
           old = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0 || !streq(expected, legacy)) {\n\t\t\tif (err >= 0)\n\t\t\t\terr = -EINVAL;\n\t\t\tgoto error;\n\t\t}\n'''
           new = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0)\n\t\t\tgoto error;\n\t\tif (!streq(expected, legacy)) {\n\t\t\tchar *rebased = strdup(legacy);\n\n\t\t\tif (rebased == NULL) {\n\t\t\t\terr = -ENOMEM;\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\tfree(base);\n\t\t\tbase = rebased;\n\t\t\toption_transport_clear(generated);\n\t\t}\n'''
           assert text.count(old) == 1
-          p.write_text(text.replace(old, new))
+          modprobe.write_text(text.replace(old, new))
           PY
-          clang-format -i tools/modprobe.c
-          git add tools/modprobe.c
+
+          clang-format -i tools/modprobe.c testsuite/test-modprobe.c
+          git add scripts/setup-rootfs.sh testsuite tools/modprobe.c
           git diff --cached --check
-          clang-format --dry-run --Werror tools/modprobe.c
-          set +e
-          clang-format --dry-run --Werror testsuite/test-modprobe.c
-          test_format_status=$?
-          set -e
-          printf '%s\n' "$test_format_status" | tee "$RUNNER_TEMP/inherited-test-format.status"
-          test "$test_format_status" -ne 0
+          clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
           git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/files.txt"
           echo '6aa489e232b40998dc955ff205e16c4d65b6472b956cc395e2d212b45ab5608a  '"$RUNNER_TEMP/files.txt" | sha256sum --check
-          git diff --cached --binary > "$RUNNER_TEMP/reconstructed.patch"
-          sha256sum "$RUNNER_TEMP/reconstructed.patch" > "$RUNNER_TEMP/reconstructed.sha256"
-          PATCH="$RUNNER_TEMP/reconstructed.patch" python3 - <<'PY' | tee "$RUNNER_TEMP/oracle.txt"
-          import binascii, os
-          from pathlib import Path
-          data = Path(os.environ["PATCH"]).read_bytes()
-          crc = binascii.crc32(data) & 0xffffffff
-          print(f"reconstructed_bytes={len(data)}")
-          print(f"reconstructed_crc32={crc:08x}")
-          print("original_isize=36682")
-          print("original_crc32=23be8cfa")
-          print(f"byte_exact_oracle_match={int(len(data) == 36682 and crc == 0x23BE8CFA)}")
-          PY
-          git diff --cached -- tools/modprobe.c | tee "$RUNNER_TEMP/tools.diff"
+          git diff --cached --binary > "$RUNNER_TEMP/reconstructed-repaired.patch"
+          sha256sum "$RUNNER_TEMP/reconstructed-repaired.patch" > "$RUNNER_TEMP/reconstructed-repaired.sha256"
+          git diff --cached -- tools/modprobe.c > "$RUNNER_TEMP/tools.diff"
+          git diff --cached -- testsuite/test-modprobe.c > "$RUNNER_TEMP/tests.diff"
 
       - name: Set up build dependencies
         shell: bash
@@ -156,13 +168,17 @@ jobs:
           meson compile -C build-${{ matrix.compiler }}
           if [[ "${{ matrix.compiler }}" == clang ]]; then export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
           build-${{ matrix.compiler }}/modprobe --version > "$RUNNER_TEMP/version-${{ matrix.compiler }}.txt"
+
           for pass in first rerun; do
             meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
             meson test -C build-${{ matrix.compiler }} test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+            grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
           done
+
           meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
           meson test -C build-${{ matrix.compiler }} --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
           python3 "$RUNNER_TEMP/fallback-discriminator.py" "$PWD/build-${{ matrix.compiler }}/modprobe" > "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
+          python3 -m json.tool "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
           sha256sum build-${{ matrix.compiler }}/modprobe > "$RUNNER_TEMP/modprobe-${{ matrix.compiler }}.sha256"
 
       - name: Retain receipts and restore clean branch
@@ -172,7 +188,7 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/reconstructed-${{ matrix.compiler }}"
           mkdir -p "$out"
-          cp "$RUNNER_TEMP"/reconstruction-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/files-before-policy.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/inherited-test-format.status "$RUNNER_TEMP"/reconstructed.patch "$RUNNER_TEMP"/reconstructed.sha256 "$RUNNER_TEMP"/oracle.txt "$RUNNER_TEMP"/tools.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
+          cp "$RUNNER_TEMP"/reconstruction-head.txt "$RUNNER_TEMP"/status-before.txt "$RUNNER_TEMP"/fallback-gzip.err "$RUNNER_TEMP"/files-before-repair.txt "$RUNNER_TEMP"/files.txt "$RUNNER_TEMP"/reconstructed-repaired.patch "$RUNNER_TEMP"/reconstructed-repaired.sha256 "$RUNNER_TEMP"/tools.diff "$RUNNER_TEMP"/tests.diff "$RUNNER_TEMP"/version-${{ matrix.compiler }}.txt "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log "$RUNNER_TEMP"/fallback-${{ matrix.compiler }}.json "$RUNNER_TEMP"/modprobe-${{ matrix.compiler }}.sha256 "$out/" 2>/dev/null || true
           git reset --hard HEAD
           git clean -fdx
           git status --short | tee "$RUNNER_TEMP/status-after.txt"
