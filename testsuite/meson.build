@@ -27,6 +27,7 @@ create_rootfs = custom_target(
     f'@project_build_root@/config.h',
     sysconfdir,
     moduledir,
+    internal_kmod_symlinks[0],
   ],
   output : 'stamp-rootfs',
   console : true,
