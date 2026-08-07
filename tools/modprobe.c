@@ -735,12 +735,23 @@ static char **prepend_options_from_env(int *p_argc, char **orig_argv)
 	}
 
 	envlen = p - env;
-	new_argv = malloc(sizeof(char *) * (argc + space_count + 3 + envlen));
-	if (new_argv == NULL)
-		return NULL;
+	{
+		size_t pointer_count, pointer_bytes, string_bytes, alloc_size;
 
-	new_argv[0] = orig_argv[0];
-	str = (char *)(new_argv + argc + space_count + 3);
+		if (uaddsz_overflow((size_t)argc, space_count, &pointer_count) ||
+		    uaddsz_overflow(pointer_count, 3, &pointer_count) ||
+		    umulsz_overflow(pointer_count, sizeof(char *), &pointer_bytes) ||
+		    uaddsz_overflow(envlen, 1, &string_bytes) ||
+		    uaddsz_overflow(pointer_bytes, string_bytes, &alloc_size))
+			return NULL;
+
+		new_argv = malloc(alloc_size);
+		if (new_argv == NULL)
+			return NULL;
+
+		new_argv[0] = orig_argv[0];
+		str = (char *)new_argv + pointer_bytes;
+	}
 	memcpy(str, env, envlen + 1);
 
 	str_end = str + envlen;
