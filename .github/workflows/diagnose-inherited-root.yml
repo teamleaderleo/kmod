@@ -13,7 +13,7 @@ permissions:
 jobs:
   inherited-root:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
       KDIR: any
       ASAN_OPTIONS: abort_on_error=1:detect_leaks=1:strict_string_checks=1
@@ -25,7 +25,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Recover attributable inputs
+      - name: Recover and repair attributable inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -66,6 +66,40 @@ jobs:
           git apply --check "$RUNNER_TEMP/fixtures.patch"
           git apply "$RUNNER_TEMP/fixtures.patch"
 
+          python3 - <<'PY'
+          from pathlib import Path
+
+          setup = Path('scripts/setup-rootfs.sh')
+          text = setup.read_text()
+          old = '["test-modprobe/exact-options-provenance/custom-root$MODULE_DIRECTORY/4.4.4/kernel/custommodule.ko"]="mod-simple.ko"'
+          new = '["test-modprobe/exact-options-provenance/custom-root$MODULE_DIRECTORY/4.4.4/kernel/mod-simple.ko"]="mod-simple.ko"'
+          assert text.count(old) == 1
+          setup.write_text(text.replace(old, new))
+
+          conf = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/config dir/provenance.conf')
+          text = conf.read_text()
+          assert text == 'install mod-loop-b $MODPROBE --show-depends custommodule\n'
+          conf.write_text('install mod-loop-b $MODPROBE --show-depends mod-simple\n')
+
+          correct = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/correct.txt')
+          text = correct.read_text()
+          assert 'custommodule' in text
+          correct.write_text(text.replace('custommodule', 'mod-simple'))
+
+          dep = Path('testsuite/rootfs-pristine/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep')
+          text = dep.read_text()
+          assert 'kernel/custommodule.ko:' in text
+          dep.write_text(text.replace('kernel/custommodule.ko:', 'kernel/mod-simple.ko:'))
+
+          test = Path('testsuite/test-modprobe.c')
+          text = test.read_text()
+          old = '''static int modprobe_exact_options_inherited_root(void)\n{\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
+          new = '''static int modprobe_exact_options_inherited_root(void)\n{\n\tint err;\n\n\terr = EXEC_TOOL(depmod, "-b", "/custom-root", "4.4.4");\n\tif (err != 0)\n\t\treturn err;\n\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
+          assert text.count(old) == 1
+          test.write_text(text.replace(old, new))
+          PY
+          clang-format -i testsuite/test-modprobe.c
+
       - name: Set up build dependencies
         shell: bash
         run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
@@ -78,17 +112,12 @@ jobs:
           meson compile -C build-baseline
           meson compile -C build-baseline testsuite/create-rootfs
 
-          root=build-baseline/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4
-          echo '--- baseline custom-root inventory ---'
-          find "$root" -maxdepth 3 -type f -printf '%P %s bytes\n' | LC_ALL=C sort
-          echo '--- baseline modules.dep ---'
-          cat "$root/modules.dep"
-
           set +e
           ( source scripts/sanitizer-env.sh; build-baseline/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/baseline.log"
-          status=${PIPESTATUS[0]}
           set -e
-          printf 'baseline_status=%s\n' "$status"
+          grep -q 'FAILED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/baseline.log"
+          grep -q "Module dir not found" "$RUNNER_TEMP/baseline.log"
+          test -f build-baseline/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep.bin
 
       - name: Run strict predecessor control
         shell: bash
@@ -97,15 +126,13 @@ jobs:
           git apply --check "$RUNNER_TEMP/strict-tools.patch"
           git apply "$RUNNER_TEMP/strict-tools.patch"
           clang-format -i tools/modprobe.c
-          meson setup --native-file build-dev.ini -Dmbedtls=disabled build-candidate
-          meson compile -C build-candidate
-          meson compile -C build-candidate testsuite/create-rootfs
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled build-strict
+          meson compile -C build-strict
+          meson compile -C build-strict testsuite/create-rootfs
 
-          set +e
-          ( source scripts/sanitizer-env.sh; build-candidate/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/strict.log"
-          status=${PIPESTATUS[0]}
-          set -e
-          printf 'strict_status=%s\n' "$status"
+          ( source scripts/sanitizer-env.sh; build-strict/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/strict.log"
+          grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/strict.log"
+          test -f build-strict/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root/lib/modules/4.4.4/modules.dep.bin
 
       - name: Run fallback successor control
         shell: bash
@@ -121,13 +148,11 @@ jobs:
           p.write_text(text.replace(old, new))
           PY
           clang-format -i tools/modprobe.c
-          meson compile -C build-candidate
+          meson compile -C build-strict
+          meson compile -C build-strict testsuite/create-rootfs
 
-          set +e
-          ( source scripts/sanitizer-env.sh; build-candidate/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/fallback.log"
-          status=${PIPESTATUS[0]}
-          set -e
-          printf 'fallback_status=%s\n' "$status"
+          ( source scripts/sanitizer-env.sh; build-strict/testsuite/test-modprobe modprobe_exact_options_inherited_root ) 2>&1 | tee "$RUNNER_TEMP/fallback.log"
+          grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/fallback.log"
 
       - name: Restore carrier tree
         if: always()
