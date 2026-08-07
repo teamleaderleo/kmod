@@ -1,0 +1,91 @@
+name: Diagnose reconstructed fallback path fence
+
+on:
+  push:
+    branches: [experiment/modprobe-exact-option-provenance-fallback-reconstructed]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: experiment/modprobe-exact-option-provenance-fallback-reconstructed
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Recover source patches and probe staged path serializations
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=5086df53090b2fe9fa1c31351c05a78a12a4ba71
+          test "$(git merge-base HEAD "$base")" = "$base"
+          git diff --quiet "$base" -- . ':(exclude).github'
+
+          git show origin/experiment/modprobe-exact-option-provenance:.github/modprobe-exact-option-provenance.patch.gz.b64 | base64 -d > "$RUNNER_TEMP/strict.gz"
+          echo 'ae01646901a5bc8305a4869446344022e21be420414ab6074fa1e2a7a5be75bd  '"$RUNNER_TEMP/strict.gz" | sha256sum -c
+          gzip -dc "$RUNNER_TEMP/strict.gz" > "$RUNNER_TEMP/strict.patch"
+          echo 'caed53a3a7f5dc57f2d4114da21a623dfd9ea1343881bdced3617adf30ecee32  '"$RUNNER_TEMP/strict.patch" | sha256sum -c
+
+          git show origin/experiment/modprobe-exact-option-provenance-fallback:.github/modprobe-exact-option-provenance-fallback.patch.gz.b64 > "$RUNNER_TEMP/fallback.b64"
+          echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  '"$RUNNER_TEMP/fallback.b64" | sha256sum -c
+          base64 -d "$RUNNER_TEMP/fallback.b64" > "$RUNNER_TEMP/fallback.gz"
+          set +e
+          gzip -dc "$RUNNER_TEMP/fallback.gz" > "$RUNNER_TEMP/fallback.patch" 2> "$RUNNER_TEMP/gzip.err"
+          set -e
+
+          PATCH="$RUNNER_TEMP/fallback.patch" STRICT="$RUNNER_TEMP/strict.patch" FIXTURES="$RUNNER_TEMP/fixtures.patch" TOOLS="$RUNNER_TEMP/tools.patch" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          def sections(text):
+              lines = text.splitlines(keepends=True)
+              starts = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
+              starts.append(len(lines))
+              return ["".join(lines[starts[i]:starts[i + 1]]) for i in range(len(starts) - 1)]
+
+          fallback = sections(Path(os.environ["PATCH"]).read_text(errors="surrogateescape"))
+          strict = sections(Path(os.environ["STRICT"]).read_text(errors="surrogateescape"))
+          assert len(fallback) == 29
+          assert fallback[28].startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c")
+          tools = next(s for s in strict if s.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"))
+          Path(os.environ["FIXTURES"]).write_text("".join(fallback[:28]), errors="surrogateescape")
+          Path(os.environ["TOOLS"]).write_text(tools, errors="surrogateescape")
+          PY
+
+          git apply --check --index "$RUNNER_TEMP/fixtures.patch"
+          git apply --index "$RUNNER_TEMP/fixtures.patch"
+          git apply --check --index "$RUNNER_TEMP/tools.patch"
+          git apply --index "$RUNNER_TEMP/tools.patch"
+          git diff --cached --check
+
+          git diff --cached --name-only | LC_ALL=C sort > "$RUNNER_TEMP/staged-files.txt"
+          git diff --cached --name-only -z | LC_ALL=C sort -z > "$RUNNER_TEMP/staged-files.nul"
+          test "$(wc -l < "$RUNNER_TEMP/staged-files.txt")" -eq 29
+
+          echo '--- staged paths ---'
+          nl -ba "$RUNNER_TEMP/staged-files.txt"
+          echo '--- path serialization hashes ---'
+          printf 'newline-separated: '; sha256sum "$RUNNER_TEMP/staged-files.txt" | cut -d' ' -f1
+          printf 'NUL-separated:     '; sha256sum "$RUNNER_TEMP/staged-files.nul" | cut -d' ' -f1
+          printf 'space-separated:   '; tr '\n' ' ' < "$RUNNER_TEMP/staged-files.txt" | sha256sum | cut -d' ' -f1
+          printf 'no-final-newline:  '; python3 - "$RUNNER_TEMP/staged-files.txt" <<'PY'
+          import hashlib, pathlib, sys
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          print(hashlib.sha256(data.rstrip(b"\n")).hexdigest())
+          PY
+          echo 'historical expected: 1439259c98f50a66778b71c6f7cc5ce442edbf484ad735316a49401ec747e435'
+
+          echo '--- section headers for manual provenance ---'
+          grep '^diff --git ' "$RUNNER_TEMP/fallback.patch" | nl -ba
+
+          git reset --hard HEAD
+          git clean -fdx
+          test -z "$(git status --short)"

@@ -1,0 +1,73 @@
+name: Diagnose reconstructed fallback policy
+
+on:
+  push:
+    branches: [experiment/modprobe-exact-option-provenance-fallback-reconstructed]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: experiment/modprobe-exact-option-provenance-fallback-reconstructed
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Materialize strict predecessor and inspect fallback replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=5086df53090b2fe9fa1c31351c05a78a12a4ba71
+          test "$(git merge-base HEAD "$base")" = "$base"
+          git diff --quiet "$base" -- . ':(exclude).github'
+
+          git show origin/experiment/modprobe-exact-option-provenance:.github/modprobe-exact-option-provenance.patch.gz.b64 | base64 -d > "$RUNNER_TEMP/strict.gz"
+          echo 'ae01646901a5bc8305a4869446344022e21be420414ab6074fa1e2a7a5be75bd  '"$RUNNER_TEMP/strict.gz" | sha256sum -c
+          gzip -dc "$RUNNER_TEMP/strict.gz" > "$RUNNER_TEMP/strict.patch"
+          echo 'caed53a3a7f5dc57f2d4114da21a623dfd9ea1343881bdced3617adf30ecee32  '"$RUNNER_TEMP/strict.patch" | sha256sum -c
+          git apply --check --index "$RUNNER_TEMP/strict.patch"
+          git apply --index "$RUNNER_TEMP/strict.patch"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("tools/modprobe.c")
+          text = p.read_text()
+          old = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0 || !streq(expected, legacy)) {\n\t\t\tif (err >= 0)\n\t\t\t\terr = -EINVAL;\n\t\t\tgoto error;\n\t\t}\n'''
+          new = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0)\n\t\t\tgoto error;\n\t\tif (!streq(expected, legacy)) {\n\t\t\tchar *rebased = strdup(legacy);\n\n\t\t\tif (rebased == NULL) {\n\t\t\t\terr = -ENOMEM;\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\tfree(base);\n\t\t\tbase = rebased;\n\t\t\toption_transport_clear(generated);\n\t\t}\n'''
+          count = text.count(old)
+          print(f"strict_block_match_count={count}")
+          if count != 1:
+              marker = "option_transport_render_legacy(base, generated, &expected);"
+              pos = text.find(marker)
+              print("--- strict source neighborhood ---")
+              print(text[max(0, pos - 500):pos + 900])
+              print("--- end strict source neighborhood ---")
+              raise SystemExit(2)
+          p.write_text(text.replace(old, new))
+          PY
+
+          git add tools/modprobe.c
+          git diff --cached --check
+          echo '--- reconstructed policy diff ---'
+          git diff --cached -- tools/modprobe.c
+          echo '--- clang-format delta ---'
+          cp tools/modprobe.c "$RUNNER_TEMP/modprobe.before-format.c"
+          clang-format tools/modprobe.c > "$RUNNER_TEMP/modprobe.formatted.c"
+          diff -u "$RUNNER_TEMP/modprobe.before-format.c" "$RUNNER_TEMP/modprobe.formatted.c" || true
+          echo '--- dry-run status ---'
+          set +e
+          clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe.c
+          fmt=$?
+          set -e
+          printf 'clang_format_status=%s\n' "$fmt"
+          git reset --hard HEAD
+          git clean -fdx
+          test -z "$(git status --short)"
