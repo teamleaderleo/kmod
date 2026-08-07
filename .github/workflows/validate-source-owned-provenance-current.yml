@@ -62,10 +62,12 @@ jobs:
         run: |
           set -euo pipefail
           extra=()
-          if [[ "${{ matrix.compiler }}" == clang ]]; then extra+=("-Db_lundef=false"); fi
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            extra+=("-Db_lundef=false")
+            export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
           meson setup --native-file build-dev.ini -Dmbedtls=disabled "${extra[@]}" build-${{ matrix.compiler }}
           meson compile -C build-${{ matrix.compiler }}
-          if [[ "${{ matrix.compiler }}" == clang ]]; then export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
 
           root="$PWD/build-${{ matrix.compiler }}/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
           for pass in first rerun; do
