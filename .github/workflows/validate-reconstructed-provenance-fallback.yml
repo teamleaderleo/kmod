@@ -126,13 +126,6 @@ jobs:
           assert text.count('kernel/custommodule.ko:') == 1
           dep.write_text(text.replace('kernel/custommodule.ko:', 'kernel/mod-simple.ko:'))
 
-          test = Path('testsuite/test-modprobe.c')
-          text = test.read_text()
-          old = '''static int modprobe_exact_options_inherited_root(void)\n{\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
-          new = '''static int modprobe_exact_options_inherited_root(void)\n{\n\tint err;\n\n\terr = EXEC_TOOL(depmod, "-b", "/custom-root", "4.4.4");\n\tif (err != 0)\n\t\treturn err;\n\n\treturn EXEC_TOOL(modprobe, "-C", "/config dir", "mod-loop-b");\n}\n'''
-          assert text.count(old) == 1
-          test.write_text(text.replace(old, new))
-
           modprobe = Path('tools/modprobe.c')
           text = modprobe.read_text()
           old = '''\t\terr = option_transport_render_legacy(base, generated, &expected);\n\t\tif (err < 0 || !streq(expected, legacy)) {\n\t\t\tif (err >= 0)\n\t\t\t\terr = -EINVAL;\n\t\t\tgoto error;\n\t\t}\n'''
@@ -171,11 +164,16 @@ jobs:
 
           for pass in first rerun; do
             meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
+            root="$PWD/build-${{ matrix.compiler }}/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
+            build-${{ matrix.compiler }}/depmod -b "$root" 4.4.4
+            test -s "$root/lib/modules/4.4.4/modules.dep.bin"
             meson test -C build-${{ matrix.compiler }} test-modprobe --verbose 2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
             grep -q 'PASSED: modprobe_exact_options_inherited_root' "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
           done
 
           meson compile -C build-${{ matrix.compiler }} testsuite/create-rootfs
+          root="$PWD/build-${{ matrix.compiler }}/testsuite/rootfs/test-modprobe/exact-options-provenance/custom-root"
+          build-${{ matrix.compiler }}/depmod -b "$root" 4.4.4
           meson test -C build-${{ matrix.compiler }} --print-errorlogs 2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
           python3 "$RUNNER_TEMP/fallback-discriminator.py" "$PWD/build-${{ matrix.compiler }}/modprobe" > "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
           python3 -m json.tool "$RUNNER_TEMP/fallback-${{ matrix.compiler }}.json"
