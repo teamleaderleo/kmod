@@ -1,0 +1,59 @@
+name: Snapshot exact option transport base
+
+on:
+  push:
+    branches:
+      - experiment/modprobe-exact-option-record
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exact-option-record-snapshot-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact experiment state
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact base
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD 5086df53090b2fe9fa1c31351c05a78a12a4ba71)" = \
+            "5086df53090b2fe9fa1c31351c05a78a12a4ba71"
+          git rev-parse HEAD > source-head.txt
+          git rev-parse 5086df53090b2fe9fa1c31351c05a78a12a4ba71 > source-base.txt
+          git status --short > source-status.txt
+
+      - name: Create source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz \
+            --output=kmod-exact-option-record-source.tar.gz \
+            5086df53090b2fe9fa1c31351c05a78a12a4ba71
+          sha256sum kmod-exact-option-record-source.tar.gz > source-sha256.txt
+
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmod-exact-option-record-source-${{ github.sha }}
+          path: |
+            kmod-exact-option-record-source.tar.gz
+            source-head.txt
+            source-base.txt
+            source-status.txt
+            source-sha256.txt
+          if-no-files-found: error
+          retention-days: 7

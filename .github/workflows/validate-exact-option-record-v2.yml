@@ -1,0 +1,217 @@
+name: Validate exact option record v2
+
+on:
+  push:
+    branches:
+      - experiment/modprobe-exact-option-record
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exact-option-record-v2-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply-build-test:
+    name: v2 experiment (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      KDIR: any
+
+    steps:
+      - name: Check out exact experiment carrier
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact ancestry and product base
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=5086df53090b2fe9fa1c31351c05a78a12a4ba71
+          test "$(git merge-base HEAD "$base")" = "$base"
+          test "$(git rev-parse "$base:tools/modprobe.c")" = \
+            413960cae0f39945a3f2d6509dc4a8c262ae2609
+          git rev-parse HEAD > "$RUNNER_TEMP/carrier-head.txt"
+          git rev-parse "$base" > "$RUNNER_TEMP/source-base.txt"
+          git status --short > "$RUNNER_TEMP/carrier-status-before.txt"
+          test ! -s "$RUNNER_TEMP/carrier-status-before.txt"
+
+      - name: Reconstruct and apply exact experiment patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch="$RUNNER_TEMP/exact-option-record-v2.patch"
+          fragment_receipt="$RUNNER_TEMP/v2-fragments.sha256"
+          cat > "$fragment_receipt" <<'EOF_HASHES'
+          45e430bf462ff78785e29b9c86ed941b850b80194e2dfaf924b20cc57722c30d  .github/exact-option-record-v2.patch.b64.part00
+          af826644f17671a8e30ea123a3926f5127cefd1198192859dc99e4155b5d1311  .github/exact-option-record-v2.patch.b64.part01
+          9d5ff4bce3d87e4be6290c7e7a422c1df8e1ba48bc170821425128e35c554f65  .github/exact-option-record-v2.patch.b64.part02
+          9ad88cf31458001114e9ac3dd5dfc26750f0526deb81bb4433b642bcd59ea42c  .github/exact-option-record-v2.patch.b64.part03
+          2b6b21c8d6e9d1e1ffc51fe2972ba5554d415e65bed25d76ec29df5d09c31dfb  .github/exact-option-record-v2.patch.b64.part04
+          fe34466e0ca61fc4629e858f5277ac6294fd68a82a14d2a06c2d2eeb68cd0abc  .github/exact-option-record-v2.patch.b64.part05
+          ee2da82363aefea4e3bfce40ddb58ba51cf4449da3586cfe32237909ac6f8616  .github/exact-option-record-v2.patch.b64.part06
+          6e5367da976d2304a1c8bf31ae0757d2ad5831ea884c11955a828c5acaf98fcd  .github/exact-option-record-v2-fixture.patch
+          EOF_HASHES
+          sha256sum --check "$fragment_receipt"
+          parts=(
+            .github/exact-option-record-v2.patch.b64.part00
+            .github/exact-option-record-v2.patch.b64.part01
+            .github/exact-option-record-v2.patch.b64.part02
+            .github/exact-option-record-v2.patch.b64.part03
+            .github/exact-option-record-v2.patch.b64.part04
+            .github/exact-option-record-v2.patch.b64.part05
+            .github/exact-option-record-v2.patch.b64.part06
+          )
+          cat "${parts[@]}" | base64 --decode > "$patch"
+          sha256sum "$patch" | tee "$RUNNER_TEMP/reconstructed-v2.sha256"
+          git apply --check --index "$patch"
+          git apply --index "$patch"
+          git apply --check --index .github/exact-option-record-v2-fixture.patch
+          git apply --index .github/exact-option-record-v2-fixture.patch
+          git diff --cached --check
+          git diff --cached --binary > "$RUNNER_TEMP/materialized-v2.patch"
+          sha256sum "$RUNNER_TEMP/materialized-v2.patch" > "$RUNNER_TEMP/materialized-v2.sha256"
+
+          python3 - <<'PY'
+          import subprocess
+
+          expected = {
+              "scripts/setup-rootfs.sh",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/correct.txt",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/exact config/modprobe.conf",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/legacy config/modprobe.conf",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/lib/modules/4.4.4/modules.alias",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/lib/modules/4.4.4/modules.dep",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/lib/modules/4.4.4/modules.devname",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/lib/modules/4.4.4/modules.softdep",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/lib/modules/4.4.4/modules.symbols",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-policy/raw\\config/modprobe.conf",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/config dir/modprobe.conf",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/correct-lengths.txt",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/correct.txt",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/lib/modules/4.4.4/modules.alias",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/lib/modules/4.4.4/modules.dep",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/lib/modules/4.4.4/modules.devname",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/lib/modules/4.4.4/modules.softdep",
+              "testsuite/rootfs-pristine/test-modprobe/exact-options-recursive/lib/modules/4.4.4/modules.symbols",
+              "testsuite/test-modprobe.c",
+              "tools/modprobe.c",
+          }
+          raw = subprocess.check_output(
+              ["git", "diff", "--cached", "--name-only", "-z"]
+          ).decode("utf-8")
+          observed = {item for item in raw.split("\0") if item}
+          if observed != expected:
+              raise SystemExit(
+                  f"materialized file fence mismatch\nmissing={sorted(expected-observed)}\n"
+                  f"extra={sorted(observed-expected)}"
+              )
+          PY
+
+      - name: Set up build dependencies
+        shell: bash
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Configure and build with sanitizers
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            extra+=("-Db_lundef=false")
+          fi
+          meson setup --native-file build-dev.ini \
+            -Dmbedtls=disabled \
+            "${extra[@]}" \
+            build-${{ matrix.compiler }}
+          meson compile -C build-${{ matrix.compiler }}
+          if [[ "${{ matrix.compiler }}" == clang ]]; then
+            export LD_LIBRARY_PATH="$(clang -print-resource-dir)/lib/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
+          "build-${{ matrix.compiler }}/modprobe" --version | \
+            tee "$RUNNER_TEMP/modprobe-version-${{ matrix.compiler }}.txt"
+
+      - name: Run focused test twice
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          build=build-${{ matrix.compiler }}
+          for pass in first rerun; do
+            meson compile -C "$build" testsuite/create-rootfs
+            meson test -C "$build" test-modprobe --verbose \
+              2>&1 | tee "$RUNNER_TEMP/focused-${{ matrix.compiler }}-$pass.log"
+          done
+
+      - name: Run complete native suite
+        shell: bash
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          set -euo pipefail
+          build=build-${{ matrix.compiler }}
+          meson compile -C "$build" testsuite/create-rootfs
+          meson test -C "$build" --print-errorlogs \
+            2>&1 | tee "$RUNNER_TEMP/full-${{ matrix.compiler }}.log"
+
+      - name: Retain exact receipts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/v2-receipt-${{ matrix.compiler }}"
+          mkdir -p "$out"
+          cp "$RUNNER_TEMP"/carrier-head.txt \
+             "$RUNNER_TEMP"/source-base.txt \
+             "$RUNNER_TEMP"/carrier-status-before.txt \
+             "$RUNNER_TEMP"/v2-fragments.sha256 \
+             "$RUNNER_TEMP"/reconstructed-v2.sha256 \
+             "$RUNNER_TEMP"/materialized-v2.patch \
+             "$RUNNER_TEMP"/materialized-v2.sha256 \
+             "$RUNNER_TEMP"/modprobe-version-${{ matrix.compiler }}.txt \
+             "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-first.log \
+             "$RUNNER_TEMP"/focused-${{ matrix.compiler }}-rerun.log \
+             "$RUNNER_TEMP"/full-${{ matrix.compiler }}.log \
+             "$out/" 2>/dev/null || true
+          if [[ -x build-${{ matrix.compiler }}/modprobe ]]; then
+            sha256sum build-${{ matrix.compiler }}/modprobe > "$out/modprobe.sha256"
+          fi
+          sha256sum .github/exact-option-record-v2.patch.b64.part* \
+            .github/exact-option-record-v2-fixture.patch > "$out/carriers.sha256"
+          git diff --cached --name-status > "$out/materialized-files.txt"
+
+      - name: Restore carrier state
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git clean -fdx
+          git status --short | tee "$RUNNER_TEMP/carrier-status-after.txt"
+          test ! -s "$RUNNER_TEMP/carrier-status-after.txt"
+
+      - name: Upload v2 receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmod-exact-option-record-v2-${{ matrix.compiler }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/v2-receipt-${{ matrix.compiler }}/
+            ${{ runner.temp }}/carrier-status-after.txt
+          if-no-files-found: error
+          retention-days: 30

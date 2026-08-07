@@ -1,0 +1,109 @@
+name: Validate modprobe exact option transport v2a
+
+on:
+  push:
+    branches:
+      - experiment/modprobe-exact-option-record
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modprobe-exact-v2a-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    env:
+      KDIR: any
+      BASE: 5086df53090b2fe9fa1c31351c05a78a12a4ba71
+    steps:
+      - name: Checkout experiment
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact base
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD "$BASE")" = "$BASE"
+          test "$(git rev-parse "$BASE:tools/modprobe.c")" = 413960cae0f39945a3f2d6509dc4a8c262ae2609
+
+      - name: Setup OS
+        shell: bash
+        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
+
+      - name: Apply v2a in runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum .github/modprobe-exact-v2a.patch
+          git apply --check .github/modprobe-exact-v2a.patch
+          git apply .github/modprobe-exact-v2a.patch
+          git add -N testsuite tools
+          git diff --check "$BASE"
+          files=$(git diff --name-only "$BASE" -- testsuite tools | wc -l)
+          test "$files" -eq 9
+          git diff --name-only "$BASE" -- testsuite tools
+
+      - name: Format check
+        shell: bash
+        run: clang-format --dry-run --Werror tools/modprobe.c testsuite/test-modprobe-options.c
+
+      - name: GCC configure and build
+        shell: bash
+        env:
+          CC: gcc
+        run: |
+          set -euo pipefail
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled build-gcc
+          meson compile -C build-gcc
+
+      - name: GCC focused tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          meson test -C build-gcc test-modprobe-options --print-errorlogs
+
+      - name: Clang configure and build
+        shell: bash
+        env:
+          CC: clang
+        run: |
+          set -euo pipefail
+          meson setup --native-file build-dev.ini -Dmbedtls=disabled -Db_lundef=false build-clang
+          meson compile -C build-clang
+
+      - name: Clang focused tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          meson test -C build-clang test-modprobe-options --print-errorlogs
+
+      - name: Preserve runner-only evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p evidence
+          printf '%s\n' "$(git rev-parse HEAD)" > evidence/carrier-head.txt
+          printf '%s\n' "$BASE" > evidence/base.txt
+          sha256sum .github/modprobe-exact-v2a.patch > evidence/patch-sha256.txt
+          git diff "$BASE" -- tools/modprobe.c testsuite > evidence/materialized.diff
+          git status --short > evidence/status.txt
+          for d in build-gcc build-clang; do
+            test -f "$d/meson-logs/testlog.txt" && cp "$d/meson-logs/testlog.txt" "evidence/${d}-testlog.txt"
+          done
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: modprobe-exact-v2a-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 7

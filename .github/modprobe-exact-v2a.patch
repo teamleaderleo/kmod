@@ -1,0 +1,571 @@
+diff --git a/testsuite/meson.build b/testsuite/meson.build
+index 6e6a368..4762219 100644
+--- a/testsuite/meson.build
++++ b/testsuite/meson.build
+@@ -82,6 +82,7 @@ _testsuite = [
+   'test-libkmod-list',
+   'test-modinfo',
+   'test-modprobe',
++  'test-modprobe-options',
+   'test-shared',
+   'test-testsuite',
+ ]
+diff --git a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-backslash.txt b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-backslash.txt
+new file mode 100644
+index 0000000..eb2f409
+--- /dev/null
++++ b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-backslash.txt
+@@ -0,0 +1 @@
++mod_loop_a
+diff --git a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-config-path.txt b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-config-path.txt
+new file mode 100644
+index 0000000..eb2f409
+--- /dev/null
++++ b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-config-path.txt
+@@ -0,0 +1 @@
++mod_loop_a
+diff --git a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-precedence.txt b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-precedence.txt
+new file mode 100644
+index 0000000..eb2f409
+--- /dev/null
++++ b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/correct-precedence.txt
+@@ -0,0 +1 @@
++mod_loop_a
+diff --git a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe config/recursive.conf b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe config/recursive.conf
+new file mode 100644
+index 0000000..cae1f71
+--- /dev/null
++++ b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe config/recursive.conf	
+@@ -0,0 +1,3 @@
++alias lf_recursive_config_alias mod-loop-a
++alias lf_precedence_alias mod-loop-a
++install mod-loop-b $MODPROBE --show-alias lf_recursive_config_alias
+diff --git a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe-config/recursive.conf b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe-config/recursive.conf
+new file mode 100644
+index 0000000..8e6db19
+--- /dev/null
++++ b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe-config/recursive.conf
+@@ -0,0 +1,3 @@
++alias lf_recursive_config_alias mod-loop-a
++alias lf_precedence_alias mod-loop-b
++install mod-loop-b $MODPROBE --show-alias lf_recursive_config_alias
+diff --git "a/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe\\config/recursive.conf" "b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe\\config/recursive.conf"
+new file mode 100644
+index 0000000..73e75c1
+--- /dev/null
++++ "b/testsuite/rootfs-pristine/test-modprobe/install-cmd-loop/etc/modprobe\\config/recursive.conf"
+@@ -0,0 +1 @@
++alias lf_backslash_alias mod-loop-a
+diff --git a/testsuite/test-modprobe-options.c b/testsuite/test-modprobe-options.c
+new file mode 100644
+index 0000000..8b3d088
+--- /dev/null
++++ b/testsuite/test-modprobe-options.c
+@@ -0,0 +1,111 @@
++// SPDX-License-Identifier: LGPL-2.1-or-later
++
++#include <stdlib.h>
++
++#include "testsuite.h"
++
++#define ROOTFS TESTSUITE_ROOTFS "test-modprobe/install-cmd-loop"
++
++static int modprobe_options_config_path_control(void)
++{
++	return EXEC_TOOL(modprobe, "-C", "/etc/modprobe-config", "mod-loop-b");
++}
++DEFINE_TEST(modprobe_options_config_path_control,
++	.description = "check recursive modprobe preserves a config path without spaces",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = ROOTFS,
++		[TC_INIT_MODULE_RETCODES] = "",
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE", TOOLS_DIR "/modprobe" },
++		{ }
++	},
++	.output = {
++		.out = ROOTFS "/correct-config-path.txt",
++	},
++	.modules_loaded = "",
++	);
++
++static int modprobe_options_config_path_space(void)
++{
++	return EXEC_TOOL(modprobe, "-C", "/etc/modprobe config", "mod-loop-b");
++}
++DEFINE_TEST(modprobe_options_config_path_space,
++	.description = "check recursive modprobe preserves a config path containing a space",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = ROOTFS,
++		[TC_INIT_MODULE_RETCODES] = "",
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE", TOOLS_DIR "/modprobe" },
++		{ }
++	},
++	.output = {
++		.out = ROOTFS "/correct-config-path.txt",
++	},
++	.modules_loaded = "",
++	);
++
++static int modprobe_options_show_precedence(void)
++{
++	return EXEC_TOOL(modprobe, "--show-alias", "lf_precedence_alias");
++}
++DEFINE_TEST_WITH_FUNC(modprobe_options_exact_precedence, modprobe_options_show_precedence,
++	.description = "check exact recursive options override the legacy mirror",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "-C /etc/modprobe-config" },
++		{ "KMOD_MODPROBE_OPTIONS", "KMOD1;2:-C,20:/etc/modprobe config," },
++		{ }
++	},
++	.output = {
++		.out = ROOTFS "/correct-precedence.txt",
++	},
++	.modules_loaded = "",
++	);
++
++static int modprobe_options_show_backslash(void)
++{
++	return EXEC_TOOL(modprobe, "--show-alias", "lf_backslash_alias");
++}
++DEFINE_TEST_WITH_FUNC(modprobe_options_legacy_backslash, modprobe_options_show_backslash,
++	.description = "check legacy MODPROBE_OPTIONS keeps raw backslashes without an exact record",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "-C /etc/modprobe\\config" },
++		{ }
++	},
++	.output = {
++		.out = ROOTFS "/correct-backslash.txt",
++	},
++	.modules_loaded = "",
++	);
++
++static int modprobe_options_malformed_exact(void)
++{
++	return EXEC_TOOL(modprobe, "--show-alias", "lf_recursive_config_alias");
++}
++DEFINE_TEST(modprobe_options_malformed_exact,
++	.description = "check malformed exact recursive options are rejected",
++	.config = {
++		[TC_UNAME_R] = "4.4.4",
++		[TC_ROOTFS] = ROOTFS,
++	},
++	.env_vars = (const struct keyval[]) {
++		{ "MODPROBE_OPTIONS", "-C /etc/modprobe-config" },
++		{ "KMOD_MODPROBE_OPTIONS", "KMOD1;2:-C,20:/etc/modprobe config" },
++		{ }
++	},
++	.expected_fail = true,
++	.modules_loaded = "",
++	);
++
++TESTSUITE_MAIN();
+diff --git a/tools/modprobe.c b/tools/modprobe.c
+index 413960c..b0c9ef7 100644
+--- a/tools/modprobe.c
++++ b/tools/modprobe.c
+@@ -10,6 +10,7 @@
+ #include <getopt.h>
+ #include <limits.h>
+ #include <stdbool.h>
++#include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -699,6 +700,182 @@ static int insmod_all(struct kmod_ctx *ctx, char **args, int nargs)
+ 	return err;
+ }
+ 
++#define MODPROBE_OPTIONS_EXACT "KMOD_MODPROBE_OPTIONS"
++#define MODPROBE_OPTIONS_EXACT_PREFIX "KMOD1;"
++#define MODPROBE_OPTIONS_EXACT_PREFIX_LEN 6
++
++static size_t decimal_len(size_t value)
++{
++	size_t len = 1;
++
++	while (value >= 10) {
++		value /= 10;
++		len++;
++	}
++
++	return len;
++}
++
++static int parse_size(const char *start, const char *end, size_t *value)
++{
++	size_t n = 0;
++
++	if (start == end || (end - start > 1 && *start == '0'))
++		return -EINVAL;
++
++	for (const char *p = start; p < end; p++) {
++		unsigned int digit;
++
++		if (*p < '0' || *p > '9')
++			return -EINVAL;
++		digit = (unsigned int)(*p - '0');
++		if (n > (SIZE_MAX - digit) / 10)
++			return -EOVERFLOW;
++		n = n * 10 + digit;
++	}
++
++	*value = n;
++	return 0;
++}
++
++static int env_modprobe_options_exact_set(const struct array *options)
++{
++	char *env, *p;
++	size_t len = MODPROBE_OPTIONS_EXACT_PREFIX_LEN;
++
++	for (size_t i = 0; i < options->count; i++) {
++		const char *arg = options->array[i];
++		size_t arglen = strlen(arg), part;
++
++		if (uaddsz_overflow(decimal_len(arglen), 2, &part) ||
++		    uaddsz_overflow(part, arglen, &part) || uaddsz_overflow(len, part, &len))
++			return -EOVERFLOW;
++	}
++	if (uaddsz_overflow(len, 1, &len))
++		return -EOVERFLOW;
++
++	env = malloc(len);
++	if (env == NULL)
++		return -ENOMEM;
++
++	p = stpcpy(env, MODPROBE_OPTIONS_EXACT_PREFIX);
++	for (size_t i = 0; i < options->count; i++) {
++		const char *arg = options->array[i];
++		size_t arglen = strlen(arg);
++		int n = sprintf(p, "%zu", arglen);
++
++		p += n;
++		*p++ = ':';
++		memcpy(p, arg, arglen);
++		p += arglen;
++		*p++ = ',';
++	}
++	*p = '\0';
++
++	if (setenv(MODPROBE_OPTIONS_EXACT, env, 1) < 0) {
++		int err = -errno;
++
++		free(env);
++		return err;
++	}
++
++	free(env);
++	return 0;
++}
++
++static char **prepend_options_from_exact_env(int *p_argc, char **orig_argv,
++					     int *p_env_argc, char **p_env_start,
++					     char **p_env_end)
++{
++	const char *env = getenv(MODPROBE_OPTIONS_EXACT);
++	const char *p, *limit;
++	char **new_argv, *str;
++	int argc = *p_argc, i;
++	size_t env_argc = 0, string_bytes = 0, pointer_count, pointer_bytes, alloc_size;
++
++	if (env == NULL)
++		return NULL;
++	if (strncmp(env, MODPROBE_OPTIONS_EXACT_PREFIX, MODPROBE_OPTIONS_EXACT_PREFIX_LEN) != 0) {
++		ERR("could not parse $%s: unsupported version\n", MODPROBE_OPTIONS_EXACT);
++		return NULL;
++	}
++
++	p = env + MODPROBE_OPTIONS_EXACT_PREFIX_LEN;
++	limit = env + strlen(env);
++	while (p < limit) {
++		const char *colon = memchr(p, ':', (size_t)(limit - p));
++		size_t arglen, bytes;
++		int err;
++
++		if (colon == NULL)
++			goto invalid;
++		err = parse_size(p, colon, &arglen);
++		if (err < 0)
++			goto invalid;
++		p = colon + 1;
++		if (arglen >= (size_t)(limit - p) || p[arglen] != ',')
++			goto invalid;
++		if (uaddsz_overflow(arglen, 1, &bytes) ||
++		    uaddsz_overflow(string_bytes, bytes, &string_bytes) ||
++		    env_argc == SIZE_MAX)
++			goto overflow;
++		env_argc++;
++		p += arglen + 1;
++	}
++
++	if (env_argc == 0) {
++		*p_env_argc = 0;
++		*p_env_start = NULL;
++		*p_env_end = NULL;
++		return orig_argv;
++	}
++
++	if (env_argc > INT_MAX || uaddsz_overflow((size_t)argc, env_argc, &pointer_count) ||
++	    uaddsz_overflow(pointer_count, 1, &pointer_count) ||
++	    umulsz_overflow(pointer_count, sizeof(char *), &pointer_bytes) ||
++	    uaddsz_overflow(pointer_bytes, string_bytes, &alloc_size))
++		goto overflow;
++
++	new_argv = malloc(alloc_size);
++	if (new_argv == NULL)
++		return NULL;
++
++	new_argv[0] = orig_argv[0];
++	str = (char *)new_argv + pointer_bytes;
++	*p_env_start = str;
++	p = env + MODPROBE_OPTIONS_EXACT_PREFIX_LEN;
++	for (i = 1; p < limit; i++) {
++		const char *colon = strchr(p, ':');
++		size_t arglen;
++
++		if (parse_size(p, colon, &arglen) < 0) {
++			free(new_argv);
++			goto invalid;
++		}
++		p = colon + 1;
++		new_argv[i] = str;
++		memcpy(str, p, arglen);
++		str[arglen] = '\0';
++		str += arglen + 1;
++		p += arglen + 1;
++	}
++	*p_env_end = str;
++
++	memcpy(new_argv + i, orig_argv + 1, sizeof(char *) * (argc - 1));
++	new_argv[i + argc - 1] = NULL;
++	*p_env_argc = i - 1;
++	*p_argc = i + argc - 1;
++
++	return new_argv;
++
++invalid:
++	ERR("could not parse $%s: malformed record\n", MODPROBE_OPTIONS_EXACT);
++	return NULL;
++overflow:
++	ERR("could not parse $%s: value too large\n", MODPROBE_OPTIONS_EXACT);
++	return NULL;
++}
++
+ static void env_modprobe_options_append(const char *value)
+ {
+ 	const char *old = getenv("MODPROBE_OPTIONS");
+@@ -719,15 +896,21 @@ static void env_modprobe_options_append(const char *value)
+ 	free(env);
+ }
+ 
+-static char **prepend_options_from_env(int *p_argc, char **orig_argv)
++static char **prepend_options_from_legacy_env(int *p_argc, char **orig_argv,
++					      int *p_env_argc, char **p_env_start,
++					      char **p_env_end)
+ {
+ 	const char *p, *env = getenv("MODPROBE_OPTIONS");
+-	char **new_argv, *str_end, *str, *s, *quote;
++	char **new_argv, *str_end, *str, *str_start, *s, *quote;
+ 	int i, argc = *p_argc;
+ 	size_t envlen, space_count = 0;
+ 
+-	if (env == NULL)
++	if (env == NULL) {
++		*p_env_argc = 0;
++		*p_env_start = NULL;
++		*p_env_end = NULL;
+ 		return orig_argv;
++	}
+ 
+ 	for (p = env; *p != '\0'; p++) {
+ 		if (*p == ' ')
+@@ -741,6 +924,7 @@ static char **prepend_options_from_env(int *p_argc, char **orig_argv)
+ 
+ 	new_argv[0] = orig_argv[0];
+ 	str = (char *)(new_argv + argc + space_count + 3);
++	str_start = str;
+ 	memcpy(str, env, envlen + 1);
+ 
+ 	str_end = str + envlen;
+@@ -783,11 +967,54 @@ static char **prepend_options_from_env(int *p_argc, char **orig_argv)
+ 
+ 	memcpy(new_argv + i, orig_argv + 1, sizeof(char *) * (argc - 1));
+ 	new_argv[i + argc - 1] = NULL;
++	*p_env_argc = i - 1;
++	*p_env_start = str_start;
++	*p_env_end = str_end + 1;
+ 	*p_argc = i + argc - 1;
+ 
+ 	return new_argv;
+ }
+ 
++static char **prepend_options_from_env(int *p_argc, char **orig_argv, int *p_env_argc,
++				       char **p_env_start, char **p_env_end, bool *p_exact)
++{
++	if (getenv(MODPROBE_OPTIONS_EXACT) != NULL) {
++		*p_exact = true;
++		return prepend_options_from_exact_env(p_argc, orig_argv, p_env_argc,
++						p_env_start, p_env_end);
++	}
++
++	*p_exact = false;
++	return prepend_options_from_legacy_env(p_argc, orig_argv, p_env_argc, p_env_start,
++					p_env_end);
++}
++
++static bool option_pointer_is_inherited(const char *p, const char *env_start,
++					const char *env_end)
++{
++	uintptr_t value, start, end;
++
++	if (p == NULL || env_start == NULL)
++		return false;
++	value = (uintptr_t)p;
++	start = (uintptr_t)env_start;
++	end = (uintptr_t)env_end;
++	return value >= start && value < end;
++}
++
++static const char *current_option_token(char **argv, int optind, const char *optarg)
++{
++	const char *token;
++
++	if (optind <= 0)
++		return NULL;
++	token = argv[optind - 1];
++	if (optarg != NULL && token == optarg && optind > 1)
++		token = argv[optind - 2];
++
++	return token;
++}
++
+ static int do_modprobe(int argc, char **orig_argv)
+ {
+ 	struct kmod_ctx *ctx;
+@@ -805,19 +1032,41 @@ static int do_modprobe(int argc, char **orig_argv)
+ 	int do_show_exports = 0;
+ 	int err;
+ 	struct stat stat_buf;
++	struct array exact_options;
++	char *env_start = NULL, *env_end = NULL;
++	int env_argc = 0;
++	bool exact_present = false;
++	bool legacy_present = getenv("MODPROBE_OPTIONS") != NULL;
+ 	bool use_syslog = false;
+ 
+-	argv = prepend_options_from_env(&argc, orig_argv);
++	array_init(&exact_options, 8);
++	argv = prepend_options_from_env(&argc, orig_argv, &env_argc, &env_start, &env_end,
++					&exact_present);
+ 	if (argv == NULL) {
+ 		ERR("Could not prepend options from environment\n");
++		array_free_array(&exact_options);
+ 		return EXIT_FAILURE;
+ 	}
+ 
++	for (int i = 0; i < env_argc; i++) {
++		if (array_append(&exact_options, argv[i + 1]) < 0) {
++			err = -ENOMEM;
++			goto done;
++		}
++	}
++
+ 	for (;;) {
++		const char *option_token;
++		bool option_inherited, optarg_inherited;
++		int before_optind = optind;
+ 		int c, idx = 0;
+ 		c = getopt_long(argc, argv, cmdopts_s, cmdopts, &idx);
+ 		if (c == -1)
+ 			break;
++		option_token = optind == before_optind ? argv[optind] :
++						current_option_token(argv, optind, optarg);
++		option_inherited = option_pointer_is_inherited(option_token, env_start, env_end);
++		optarg_inherited = option_pointer_is_inherited(optarg, env_start, env_end);
+ 		switch (c) {
+ 		case 'a':
+ 			log_priority = LOG_WARNING;
+@@ -908,6 +1157,19 @@ static int do_modprobe(int argc, char **orig_argv)
+ 			n_config_paths++;
+ 			config_paths[n_config_paths] = NULL;
+ 
++			if (!option_inherited) {
++				if (array_append(&exact_options, "-C") < 0 ||
++				    array_append(&exact_options, optarg) < 0) {
++					err = -ENOMEM;
++					goto done;
++				}
++			} else if (!optarg_inherited) {
++				if (array_append(&exact_options, optarg) < 0) {
++					err = -ENOMEM;
++					goto done;
++				}
++			}
++
+ 			env_modprobe_options_append("-C");
+ 			env_modprobe_options_append(optarg);
+ 			break;
+@@ -919,14 +1181,26 @@ static int do_modprobe(int argc, char **orig_argv)
+ 			kversion = optarg;
+ 			break;
+ 		case 's':
++			if (!option_inherited && array_append(&exact_options, "-s") < 0) {
++				err = -ENOMEM;
++				goto done;
++			}
+ 			env_modprobe_options_append("-s");
+ 			use_syslog = true;
+ 			break;
+ 		case 'q':
++			if (!option_inherited && array_append(&exact_options, "-q") < 0) {
++				err = -ENOMEM;
++				goto done;
++			}
+ 			env_modprobe_options_append("-q");
+ 			verbose = LOG_EMERG;
+ 			break;
+ 		case 'v':
++			if (!option_inherited && array_append(&exact_options, "-v") < 0) {
++				err = -ENOMEM;
++				goto done;
++			}
+ 			env_modprobe_options_append("-v");
+ 			verbose++;
+ 			break;
+@@ -948,6 +1222,14 @@ static int do_modprobe(int argc, char **orig_argv)
+ 		}
+ 	}
+ 
++	if (exact_present || legacy_present || exact_options.count > 0) {
++		err = env_modprobe_options_exact_set(&exact_options);
++		if (err < 0) {
++			ERR("could not set $%s: %s\n", MODPROBE_OPTIONS_EXACT, strerror(-err));
++			goto done;
++		}
++	}
++
+ 	args = argv + optind;
+ 	nargs = argc - optind;
+ 
+@@ -1028,6 +1310,7 @@ done:
+ 		free(argv);
+ 
+ 	free(config_paths);
++	array_free_array(&exact_options);
+ 
+ 	return err >= 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+ }
