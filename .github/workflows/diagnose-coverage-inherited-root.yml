@@ -63,18 +63,18 @@ jobs:
           meson = Path('testsuite/meson.build')
           text = meson.read_text()
           old = '''    sysconfdir,\n    moduledir,\n  ],\n'''
-          new = '''    sysconfdir,\n    moduledir,\n    kmod,\n  ],\n'''
+          new = '''    sysconfdir,\n    moduledir,\n    internal_kmod_symlinks[0],\n  ],\n'''
           assert text.count(old) == 1
           meson.write_text(text.replace(old, new))
 
           setup = Path('scripts/setup-rootfs.sh')
           text = setup.read_text()
           old = '''MODULE_DIRECTORY=$6\n'''
-          new = '''MODULE_DIRECTORY=$6\nKMOD=$7\n'''
+          new = '''MODULE_DIRECTORY=$6\nDEPMOD=$7\n'''
           assert text.count(old) == 1
           text = text.replace(old, new)
           old = '''for m in "${attach_pkcs7_array[@]}"; do\n    cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"\ndone\n\ntouch testsuite/stamp-rootfs\n'''
-          new = '''for m in "${attach_pkcs7_array[@]}"; do\n    cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"\ndone\n\n"$KMOD" depmod -b "$ROOTFS/test-modprobe/exact-options-provenance/custom-root" 4.4.4\n\ntouch testsuite/stamp-rootfs\n'''
+          new = '''for m in "${attach_pkcs7_array[@]}"; do\n    cat "${MODULE_PLAYGROUND}/dummy.pkcs7" >>"${ROOTFS}/$m"\ndone\n\n"$DEPMOD" -b "$ROOTFS/test-modprobe/exact-options-provenance/custom-root" 4.4.4\n\ntouch testsuite/stamp-rootfs\n'''
           assert text.count(old) == 1
           setup.write_text(text.replace(old, new))
           PY
