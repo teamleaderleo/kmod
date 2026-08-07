@@ -17,19 +17,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  apply-build-test:
-    name: fallback v2 (${{ matrix.compiler }})
+  diagnose-carrier:
+    name: fallback carrier integrity oracle
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        compiler: [gcc, clang]
-    env:
-      KDIR: any
-      ASAN_OPTIONS: abort_on_error=1:detect_leaks=1:strict_string_checks=1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-
+    timeout-minutes: 10
     steps:
       - name: Check out exact experiment branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -38,7 +29,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify exact source base
+      - name: Verify exact sources and decode carriers
         shell: bash
         run: |
           set -euo pipefail
@@ -48,14 +39,17 @@ jobs:
             413960cae0f39945a3f2d6509dc4a8c262ae2609
           git diff --quiet "$base" -- . ':(exclude).github'
           echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  .github/modprobe-exact-option-provenance-fallback.patch.gz.b64' | sha256sum --check
-          git status --short | tee "$RUNNER_TEMP/status-before.txt"
-          test ! -s "$RUNNER_TEMP/status-before.txt"
-          git rev-parse HEAD > "$RUNNER_TEMP/carrier-head.txt"
 
-      - name: Recover clean strict-provenance reference
-        shell: bash
-        run: |
-          set -euo pipefail
+          fallback_gz="$RUNNER_TEMP/fallback.patch.gz"
+          fallback_patch="$RUNNER_TEMP/fallback.patch"
+          base64 --decode .github/modprobe-exact-option-provenance-fallback.patch.gz.b64 > "$fallback_gz"
+          set +e
+          gzip --decompress --stdout "$fallback_gz" > "$fallback_patch" 2> "$RUNNER_TEMP/fallback-gzip.err"
+          fallback_status=$?
+          set -e
+          printf '%s\n' "$fallback_status" > "$RUNNER_TEMP/fallback-gzip.status"
+          test -s "$fallback_patch"
+
           strict_b64="$RUNNER_TEMP/strict.patch.gz.b64"
           strict_gz="$RUNNER_TEMP/strict.patch.gz"
           strict_patch="$RUNNER_TEMP/strict.patch"
@@ -66,162 +60,44 @@ jobs:
           echo 'caed53a3a7f5dc57f2d4114da21a623dfd9ea1343881bdced3617adf30ecee32  '"$strict_patch" | sha256sum --check
           git apply --check "$strict_patch"
 
-      - name: Recover and diagnose fallback payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          carrier=.github/modprobe-exact-option-provenance-fallback.patch.gz.b64
-          gzip_file="$RUNNER_TEMP/fallback.patch.gz"
-          patch="$RUNNER_TEMP/fallback.patch"
-          base64 --decode "$carrier" > "$gzip_file"
-          sha256sum "$gzip_file" > "$RUNNER_TEMP/fallback-gzip.sha256"
-          set +e
-          gzip --decompress --stdout "$gzip_file" > "$patch" \
-            2> "$RUNNER_TEMP/fallback-gzip.err"
-          gzip_status=$?
-          set -e
-          printf '%s\n' "$gzip_status" > "$RUNNER_TEMP/fallback-gzip.status"
-          test -s "$patch"
-          sha256sum "$patch" > "$RUNNER_TEMP/fallback-source-patch.sha256"
-
-          set +e
-          git apply --check --index "$patch" \
-            > "$RUNNER_TEMP/apply-normal.out" \
-            2> "$RUNNER_TEMP/apply-normal.err"
-          normal_status=$?
-          git apply --recount --check --index "$patch" \
-            > "$RUNNER_TEMP/apply-recount.out" \
-            2> "$RUNNER_TEMP/apply-recount.err"
-          recount_status=$?
-          set -e
-          printf '%s\n' "$normal_status" > "$RUNNER_TEMP/apply-normal.status"
-          printf '%s\n' "$recount_status" > "$RUNNER_TEMP/apply-recount.status"
-          test "$normal_status" -ne 0
-          test "$recount_status" -ne 0
-
-          PATCH="$patch" STRICT_PATCH="$RUNNER_TEMP/strict.patch" python3 - <<'PY'
-          import difflib
+          FALLBACK_GZ="$fallback_gz" FALLBACK_PATCH="$fallback_patch" STRICT_PATCH="$strict_patch" python3 - <<'PY'
+          import binascii
           import os
           import pathlib
-          import subprocess
-          import tempfile
+          import struct
 
-          patch = pathlib.Path(os.environ["PATCH"]).read_text(errors="surrogateescape")
-          strict_patch = pathlib.Path(os.environ["STRICT_PATCH"]).read_text(errors="surrogateescape")
+          def metrics(label, data):
+              print(f"{label}.bytes={len(data)}")
+              print(f"{label}.crc32={binascii.crc32(data) & 0xffffffff:08x}")
 
-          def sections(text):
-              lines = text.splitlines(keepends=True)
-              starts = [i for i, line in enumerate(lines) if line.startswith("diff --git ")]
-              starts.append(len(lines))
-              return ["".join(lines[starts[n]:starts[n + 1]]) for n in range(len(starts) - 1)]
-
-          fallback_sections = sections(patch)
-          strict_sections = sections(strict_patch)
-          print(f"fallback diff sections: {len(fallback_sections)}")
-          for n, section in enumerate(fallback_sections, 1):
-              with tempfile.NamedTemporaryFile("w", delete=False, errors="surrogateescape") as f:
-                  f.write(section)
-                  name = f.name
-              result = subprocess.run(
-                  ["git", "apply", "--recount", "--check", name],
-                  text=True,
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE,
-              )
-              os.unlink(name)
-              header = section.splitlines()[0]
-              state = "OK" if result.returncode == 0 else "FAIL"
-              print(f"section {n:02d}: {state}: {header}")
-
-          fallback_tools = next(s for s in fallback_sections if s.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"))
-          strict_tools = next(s for s in strict_sections if s.startswith("diff --git a/tools/modprobe.c b/tools/modprobe.c"))
-          f = fallback_tools.splitlines()
-          s = strict_tools.splitlines()
-
-          bad = next((i for i, line in enumerate(f) if line.startswith("] = { (char *);")), None)
-          print(f"fallback corrupt marker index: {bad}")
-          if bad is not None:
-              print("--- fallback corrupt neighborhood ---")
-              for i in range(max(0, bad - 24), min(len(f), bad + 61)):
-                  print(f"F{i + 1:04d}: {f[i]}")
-              print("--- end fallback corrupt neighborhood ---")
-
-          matcher = difflib.SequenceMatcher(a=s, b=f, autojunk=False)
-          opcodes = matcher.get_opcodes()
-          print(f"alignment opcodes: {len(opcodes)}")
-          for tag, i1, i2, j1, j2 in opcodes:
-              if tag == "equal":
-                  if i2 - i1 >= 8:
-                      print(f"EQUAL strict[{i1 + 1}:{i2}] fallback[{j1 + 1}:{j2}] lines={i2 - i1}")
-                  continue
-              print(f"{tag.upper()} strict[{i1 + 1}:{i2}] fallback[{j1 + 1}:{j2}]")
-              if (i2 - i1) <= 120 and (j2 - j1) <= 120:
-                  for i in range(i1, i2):
-                      print(f"  S{i + 1:04d}: {s[i]}")
-                  for j in range(j1, j2):
-                      print(f"  F{j + 1:04d}: {f[j]}")
-
-          anchors = [i for i, line in enumerate(s) if "option_transport_clear(&selected);" in line]
-          print(f"strict reference anchors: {anchors}")
-          for anchor in anchors:
-              print("--- strict-reference neighborhood ---")
-              for i in range(max(0, anchor - 24), min(len(s), anchor + 121)):
-                  print(f"S{i + 1:04d}: {s[i]}")
-              print("--- end strict-reference neighborhood ---")
+          gz = pathlib.Path(os.environ["FALLBACK_GZ"]).read_bytes()
+          recovered = pathlib.Path(os.environ["FALLBACK_PATCH"]).read_bytes()
+          strict = pathlib.Path(os.environ["STRICT_PATCH"]).read_bytes()
+          trailer_crc, trailer_size = struct.unpack("<II", gz[-8:])
+          print(f"fallback.gzip_bytes={len(gz)}")
+          print(f"fallback.trailer_crc32={trailer_crc:08x}")
+          print(f"fallback.trailer_isize={trailer_size}")
+          metrics("fallback.recovered", recovered)
+          metrics("strict.patch", strict)
+          print(f"size_delta.recovered_minus_trailer={len(recovered) - trailer_size}")
+          print(f"size_delta.trailer_minus_strict={trailer_size - len(strict)}")
+          print(f"crc_match.recovered={int((binascii.crc32(recovered) & 0xffffffff) == trailer_crc)}")
+          print(f"size_match.recovered={int((len(recovered) & 0xffffffff) == trailer_size)}")
           PY
-          exit "$recount_status"
 
-      - name: Set up build dependencies
-        shell: bash
-        run: sudo -E ./.github/actions/setup-os/setup-ubuntu.sh
-
-      - name: Format, build, and test
-        shell: bash
-        env:
-          CC: ${{ matrix.compiler }}
-        run: |
-          set -euo pipefail
-          echo 'unreachable until a clean reconstructed carrier is introduced'
-          exit 1
-
-      - name: Retain receipts
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/fallback-v2-${{ matrix.compiler }}"
-          mkdir -p "$out"
-          cp "$RUNNER_TEMP"/carrier-head.txt \
-             "$RUNNER_TEMP"/status-before.txt \
-             "$RUNNER_TEMP"/fallback-gzip.sha256 \
-             "$RUNNER_TEMP"/fallback-gzip.err \
-             "$RUNNER_TEMP"/fallback-gzip.status \
-             "$RUNNER_TEMP"/fallback-source-patch.sha256 \
-             "$RUNNER_TEMP"/apply-normal.out \
-             "$RUNNER_TEMP"/apply-normal.err \
-             "$RUNNER_TEMP"/apply-normal.status \
-             "$RUNNER_TEMP"/apply-recount.out \
-             "$RUNNER_TEMP"/apply-recount.err \
-             "$RUNNER_TEMP"/apply-recount.status \
-             "$out/" 2>/dev/null || true
-
-      - name: Restore carrier state
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          git reset --hard HEAD
-          git clean -fdx
+          sha256sum "$fallback_gz" "$fallback_patch" "$strict_gz" "$strict_patch" > "$RUNNER_TEMP/carrier-metrics.sha256"
           git status --short | tee "$RUNNER_TEMP/status-after.txt"
           test ! -s "$RUNNER_TEMP/status-after.txt"
 
-      - name: Upload receipts
+      - name: Upload diagnostic receipts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kmod-fallback-v2-${{ matrix.compiler }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: kmod-fallback-carrier-oracle-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/fallback-v2-${{ matrix.compiler }}/
+            ${{ runner.temp }}/fallback-gzip.err
+            ${{ runner.temp }}/fallback-gzip.status
+            ${{ runner.temp }}/carrier-metrics.sha256
             ${{ runner.temp }}/status-after.txt
           if-no-files-found: error
           retention-days: 30
