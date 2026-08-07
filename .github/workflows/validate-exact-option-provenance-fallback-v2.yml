@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   diagnose-carrier:
-    name: fallback carrier integrity oracle
+    name: fallback single-bit repair search
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify exact sources and decode carriers
+      - name: Verify source and search exact repair
         shell: bash
         run: |
           set -euo pipefail
@@ -40,64 +40,66 @@ jobs:
           git diff --quiet "$base" -- . ':(exclude).github'
           echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  .github/modprobe-exact-option-provenance-fallback.patch.gz.b64' | sha256sum --check
 
-          fallback_gz="$RUNNER_TEMP/fallback.patch.gz"
-          fallback_patch="$RUNNER_TEMP/fallback.patch"
-          base64 --decode .github/modprobe-exact-option-provenance-fallback.patch.gz.b64 > "$fallback_gz"
-          set +e
-          gzip --decompress --stdout "$fallback_gz" > "$fallback_patch" 2> "$RUNNER_TEMP/fallback-gzip.err"
-          fallback_status=$?
-          set -e
-          printf '%s\n' "$fallback_status" > "$RUNNER_TEMP/fallback-gzip.status"
-          test -s "$fallback_patch"
-
-          strict_b64="$RUNNER_TEMP/strict.patch.gz.b64"
-          strict_gz="$RUNNER_TEMP/strict.patch.gz"
-          strict_patch="$RUNNER_TEMP/strict.patch"
-          git show origin/experiment/modprobe-exact-option-provenance:.github/modprobe-exact-option-provenance.patch.gz.b64 > "$strict_b64"
-          base64 --decode "$strict_b64" > "$strict_gz"
-          echo 'ae01646901a5bc8305a4869446344022e21be420414ab6074fa1e2a7a5be75bd  '"$strict_gz" | sha256sum --check
-          gzip --decompress --stdout "$strict_gz" > "$strict_patch"
-          echo 'caed53a3a7f5dc57f2d4114da21a623dfd9ea1343881bdced3617adf30ecee32  '"$strict_patch" | sha256sum --check
-          git apply --check "$strict_patch"
-
-          FALLBACK_GZ="$fallback_gz" FALLBACK_PATCH="$fallback_patch" STRICT_PATCH="$strict_patch" python3 - <<'PY'
+          base64 --decode .github/modprobe-exact-option-provenance-fallback.patch.gz.b64 > "$RUNNER_TEMP/damaged.patch.gz"
+          GZIP="$RUNNER_TEMP/damaged.patch.gz" OUT_GZIP="$RUNNER_TEMP/repaired.patch.gz" OUT_PATCH="$RUNNER_TEMP/repaired.patch" python3 - <<'PY'
           import binascii
+          import hashlib
           import os
           import pathlib
           import struct
+          import zlib
 
-          def metrics(label, data):
-              print(f"{label}.bytes={len(data)}")
-              print(f"{label}.crc32={binascii.crc32(data) & 0xffffffff:08x}")
+          gz = bytearray(pathlib.Path(os.environ["GZIP"]).read_bytes())
+          expected_crc, expected_size = struct.unpack("<II", gz[-8:])
+          print(f"gzip_bytes={len(gz)} expected_crc={expected_crc:08x} expected_size={expected_size}")
 
-          gz = pathlib.Path(os.environ["FALLBACK_GZ"]).read_bytes()
-          recovered = pathlib.Path(os.environ["FALLBACK_PATCH"]).read_bytes()
-          strict = pathlib.Path(os.environ["STRICT_PATCH"]).read_bytes()
-          trailer_crc, trailer_size = struct.unpack("<II", gz[-8:])
-          print(f"fallback.gzip_bytes={len(gz)}")
-          print(f"fallback.trailer_crc32={trailer_crc:08x}")
-          print(f"fallback.trailer_isize={trailer_size}")
-          metrics("fallback.recovered", recovered)
-          metrics("strict.patch", strict)
-          print(f"size_delta.recovered_minus_trailer={len(recovered) - trailer_size}")
-          print(f"size_delta.trailer_minus_strict={trailer_size - len(strict)}")
-          print(f"crc_match.recovered={int((binascii.crc32(recovered) & 0xffffffff) == trailer_crc)}")
-          print(f"size_match.recovered={int((len(recovered) & 0xffffffff) == trailer_size)}")
+          found = []
+          for offset in range(10, len(gz) - 8):
+              original = gz[offset]
+              for bit in range(8):
+                  gz[offset] = original ^ (1 << bit)
+                  try:
+                      out = zlib.decompress(bytes(gz), wbits=31)
+                  except zlib.error:
+                      continue
+                  if len(out) != expected_size:
+                      continue
+                  if (binascii.crc32(out) & 0xffffffff) != expected_crc:
+                      continue
+                  found.append((offset, bit, bytes(gz), out))
+              gz[offset] = original
+
+          print(f"matching_single_bit_repairs={len(found)}")
+          for offset, bit, repaired, out in found:
+              print(f"repair offset={offset} bit={bit} xor=0x{1 << bit:02x}")
+              print(f"repaired_gzip_sha256={hashlib.sha256(repaired).hexdigest()}")
+              print(f"repaired_patch_sha256={hashlib.sha256(out).hexdigest()}")
+          if len(found) != 1:
+              raise SystemExit(2)
+
+          _, _, repaired, out = found[0]
+          pathlib.Path(os.environ["OUT_GZIP"]).write_bytes(repaired)
+          pathlib.Path(os.environ["OUT_PATCH"]).write_bytes(out)
           PY
 
-          sha256sum "$fallback_gz" "$fallback_patch" "$strict_gz" "$strict_patch" > "$RUNNER_TEMP/carrier-metrics.sha256"
+          git apply --check "$RUNNER_TEMP/repaired.patch"
+          test "$(grep -c '^diff --git ' "$RUNNER_TEMP/repaired.patch")" -eq 29
+          git apply --numstat "$RUNNER_TEMP/repaired.patch" | tee "$RUNNER_TEMP/repaired.numstat"
+          sha256sum "$RUNNER_TEMP/repaired.patch.gz" "$RUNNER_TEMP/repaired.patch" | tee "$RUNNER_TEMP/repaired.sha256"
+          gzip --test "$RUNNER_TEMP/repaired.patch.gz"
           git status --short | tee "$RUNNER_TEMP/status-after.txt"
           test ! -s "$RUNNER_TEMP/status-after.txt"
 
-      - name: Upload diagnostic receipts
+      - name: Upload exact repair receipts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kmod-fallback-carrier-oracle-${{ github.run_id }}-${{ github.run_attempt }}
+          name: kmod-fallback-single-bit-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/fallback-gzip.err
-            ${{ runner.temp }}/fallback-gzip.status
-            ${{ runner.temp }}/carrier-metrics.sha256
+            ${{ runner.temp }}/repaired.patch.gz
+            ${{ runner.temp }}/repaired.patch
+            ${{ runner.temp }}/repaired.numstat
+            ${{ runner.temp }}/repaired.sha256
             ${{ runner.temp }}/status-after.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
