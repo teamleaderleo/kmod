@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   diagnose-carrier:
-    name: fallback single-bit repair search
+    name: fallback targeted byte repair search
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify source and search exact repair
+      - name: Verify source and map corruption
         shell: bash
         run: |
           set -euo pipefail
@@ -41,7 +41,14 @@ jobs:
           echo 'c11bc8225e9e16f29638bbc9c5cf53ccd3c0a21d5be6ae31df2f392e86b59599  .github/modprobe-exact-option-provenance-fallback.patch.gz.b64' | sha256sum --check
 
           base64 --decode .github/modprobe-exact-option-provenance-fallback.patch.gz.b64 > "$RUNNER_TEMP/damaged.patch.gz"
-          GZIP="$RUNNER_TEMP/damaged.patch.gz" OUT_GZIP="$RUNNER_TEMP/repaired.patch.gz" OUT_PATCH="$RUNNER_TEMP/repaired.patch" python3 - <<'PY'
+          set +e
+          gzip --decompress --stdout "$RUNNER_TEMP/damaged.patch.gz" > "$RUNNER_TEMP/damaged.patch" 2> "$RUNNER_TEMP/damaged-gzip.err"
+          gzip_status=$?
+          set -e
+          printf '%s\n' "$gzip_status" > "$RUNNER_TEMP/damaged-gzip.status"
+          test -s "$RUNNER_TEMP/damaged.patch"
+
+          GZIP="$RUNNER_TEMP/damaged.patch.gz" PATCH="$RUNNER_TEMP/damaged.patch" OUT_GZIP="$RUNNER_TEMP/repaired.patch.gz" OUT_PATCH="$RUNNER_TEMP/repaired.patch" python3 - <<'PY'
           import binascii
           import hashlib
           import os
@@ -50,14 +57,44 @@ jobs:
           import zlib
 
           gz = bytearray(pathlib.Path(os.environ["GZIP"]).read_bytes())
+          damaged = pathlib.Path(os.environ["PATCH"]).read_bytes()
           expected_crc, expected_size = struct.unpack("<II", gz[-8:])
+          marker = b"+    err == 0)"
+          target = damaged.find(marker)
+          if target < 0:
+              raise SystemExit("corrupt marker not found")
           print(f"gzip_bytes={len(gz)} expected_crc={expected_crc:08x} expected_size={expected_size}")
+          print(f"first_bad_output_offset={target}")
 
+          d = zlib.decompressobj(wbits=31)
+          total = 0
+          mapped = None
+          for offset in range(len(gz) - 8):
+              try:
+                  out = d.decompress(bytes([gz[offset]]))
+              except zlib.error as exc:
+                  print(f"stream_error_at={offset}: {exc}")
+                  break
+              before = total
+              total += len(out)
+              if mapped is None and before <= target < total:
+                  mapped = offset
+                  print(f"mapped_input_offset={mapped} output_range={before}:{total}")
+          if mapped is None:
+              raise SystemExit("could not map corrupt output offset")
+
+          lo = max(10, mapped - 96)
+          hi = min(len(gz) - 8, mapped + 97)
+          print(f"search_window={lo}:{hi} bytes={hi - lo}")
           found = []
-          for offset in range(10, len(gz) - 8):
+          attempts = 0
+          for offset in range(lo, hi):
               original = gz[offset]
-              for bit in range(8):
-                  gz[offset] = original ^ (1 << bit)
+              for value in range(256):
+                  if value == original:
+                      continue
+                  attempts += 1
+                  gz[offset] = value
                   try:
                       out = zlib.decompress(bytes(gz), wbits=31)
                   except zlib.error:
@@ -66,18 +103,18 @@ jobs:
                       continue
                   if (binascii.crc32(out) & 0xffffffff) != expected_crc:
                       continue
-                  found.append((offset, bit, bytes(gz), out))
+                  found.append((offset, original, value, bytes(gz), out))
               gz[offset] = original
 
-          print(f"matching_single_bit_repairs={len(found)}")
-          for offset, bit, repaired, out in found:
-              print(f"repair offset={offset} bit={bit} xor=0x{1 << bit:02x}")
+          print(f"attempts={attempts} matching_byte_repairs={len(found)}")
+          for offset, original, value, repaired, out in found:
+              print(f"repair offset={offset} old=0x{original:02x} new=0x{value:02x} xor=0x{original ^ value:02x}")
               print(f"repaired_gzip_sha256={hashlib.sha256(repaired).hexdigest()}")
               print(f"repaired_patch_sha256={hashlib.sha256(out).hexdigest()}")
           if len(found) != 1:
               raise SystemExit(2)
 
-          _, _, repaired, out = found[0]
+          _, _, _, repaired, out = found[0]
           pathlib.Path(os.environ["OUT_GZIP"]).write_bytes(repaired)
           pathlib.Path(os.environ["OUT_PATCH"]).write_bytes(out)
           PY
@@ -94,8 +131,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kmod-fallback-single-bit-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          name: kmod-fallback-targeted-byte-repair-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/damaged-gzip.err
+            ${{ runner.temp }}/damaged-gzip.status
             ${{ runner.temp }}/repaired.patch.gz
             ${{ runner.temp }}/repaired.patch
             ${{ runner.temp }}/repaired.numstat
