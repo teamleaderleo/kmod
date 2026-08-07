@@ -3,6 +3,8 @@ name: Diagnose coverage inherited-root fixture
 on:
   push:
     branches: [experiment/modprobe-provenance-fallback-current-master]
+  pull_request:
+    branches: [internal/provenance-fallback-current-base]
   workflow_dispatch:
 
 permissions:
