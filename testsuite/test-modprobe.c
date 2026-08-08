@@ -179,6 +179,13 @@ DEFINE_TEST(modprobe_install_cmd_loop,
 	.modules_loaded = "mod-loop-b,mod-loop-a",
 	);
 
+static int modprobe_empty_env(void)
+{
+	return EXEC_TOOL(modprobe, "--version");
+}
+DEFINE_TEST(modprobe_empty_env, .description = "check empty MODPROBE_OPTIONS",
+	    .env_vars = (const struct keyval[]){ { "MODPROBE_OPTIONS", "" }, {} }, );
+
 static int modprobe_param_kcmdline_show_deps(void)
 {
 	return EXEC_TOOL(modprobe, "--show-depends", "mod-simple");
